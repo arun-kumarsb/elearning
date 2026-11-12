@@ -14,3 +14,4 @@ Start-Sleep -Seconds 3
 # Start Streamlit Frontend
 Write-Host "[2/2] Starting Streamlit Frontend on http://localhost:8501 ..." -ForegroundColor Green
 python -m streamlit run frontend/app.py --server.port 8501 --server.address 0.0.0.0
+

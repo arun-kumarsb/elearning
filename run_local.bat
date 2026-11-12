@@ -20,3 +20,4 @@ echo App will open automatically in your default browser.
 echo ====================================================================
 python -m streamlit run frontend/app.py --server.port 8501 --server.address 0.0.0.0
 pause
+
