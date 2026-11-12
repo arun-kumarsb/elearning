@@ -73,3 +73,4 @@ def remove_student(student_id):
         return jsonify({"success": True, "message": f"Student ID {student_id} deleted successfully"}), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+

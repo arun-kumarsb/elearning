@@ -44,3 +44,4 @@ echo "1. Run database migration: python3 database/apply_migrations.py"
 echo "2. Start Backend:          ./start_backend.sh"
 echo "3. Start Frontend:         ./start_frontend.sh"
 echo "=================================================================="
+

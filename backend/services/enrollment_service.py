@@ -105,3 +105,4 @@ def delete_enrollment(enrollment_id: int) -> bool:
         
     execute_db("DELETE FROM enrollments WHERE id = %s", (enrollment_id,))
     return True
+

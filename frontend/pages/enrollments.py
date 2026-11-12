@@ -155,3 +155,4 @@ def render_admin_enrollments():
                     st.rerun()
                 else:
                     st.error(f"Enrollment Error: {res.get('error')}")
+

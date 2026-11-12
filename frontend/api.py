@@ -130,3 +130,4 @@ def api_get_xen_status() -> Dict[str, Any]:
 
 def api_get_health() -> Dict[str, Any]:
     return safe_request("GET", "health")
+

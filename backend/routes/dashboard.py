@@ -26,3 +26,4 @@ def dashboard():
             "success": False,
             "error": f"Failed to retrieve dashboard data from MariaDB: {str(e)}"
         }), 500
+

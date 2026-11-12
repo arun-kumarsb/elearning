@@ -75,3 +75,4 @@ def render_sidebar():
             st.rerun()
             
         return selected_page
+

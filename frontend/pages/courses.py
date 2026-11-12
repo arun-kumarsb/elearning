@@ -192,3 +192,4 @@ def render_admin_course_management():
                     st.rerun()
                 else:
                     st.error(f"Failed to delete course: {del_res.get('error')}")
+

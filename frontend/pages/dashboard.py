@@ -106,3 +106,4 @@ def render_dashboard_page():
             """,
             unsafe_allow_html=True
         )
+

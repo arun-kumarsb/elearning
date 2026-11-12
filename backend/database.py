@@ -131,3 +131,4 @@ def ensure_schema():
     except Exception as e:
         logger.error(f"ensure_schema failed: {e}")
         return False
+

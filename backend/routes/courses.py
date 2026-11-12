@@ -101,3 +101,4 @@ def remove_course(course_id):
         }), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+

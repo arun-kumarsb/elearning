@@ -70,3 +70,4 @@ def get_dashboard_summary() -> dict:
             "environment": Config.XEN_ENVIRONMENT
         }
     }
+

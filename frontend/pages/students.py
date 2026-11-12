@@ -120,3 +120,4 @@ def render_students_page():
                         st.info(f"Student can log in using email: **{email}** and password: **{password or 'Student@123'}**")
                     else:
                         st.error(f"Failed to register student: {res.get('error')}")
+

@@ -85,3 +85,4 @@ def remove_enrollment(enrollment_id):
         }), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+

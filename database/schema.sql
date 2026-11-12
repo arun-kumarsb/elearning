@@ -83,3 +83,4 @@ INSERT IGNORE INTO users (email, password_hash, role, student_id) VALUES
 
 -- Initial Enrollment
 INSERT IGNORE INTO enrollments (student_id, course_id) VALUES (1, 1);
+

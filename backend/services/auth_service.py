@@ -131,3 +131,4 @@ def create_user_record(email: str, password: str, role: str = "student", student
         VALUES (%s, %s, %s, %s)
     """
     return execute_db(query, (email.strip().lower(), hashed, role, student_id), return_last_id=True)
+

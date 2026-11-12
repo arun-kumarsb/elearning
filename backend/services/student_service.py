@@ -115,3 +115,4 @@ def delete_student(student_id: int) -> bool:
         
     execute_db("DELETE FROM students WHERE id = %s", (student_id,))
     return True
+

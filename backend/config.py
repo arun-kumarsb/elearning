@@ -29,3 +29,4 @@ class Config:
     
     # Optional Mock DB for local offline UI unit testing
     USE_MOCK_DB = os.getenv("USE_MOCK_DB", "False").lower() in ("true", "1", "t")
+

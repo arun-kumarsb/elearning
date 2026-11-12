@@ -115,3 +115,4 @@ def get_xen_cluster_metadata() -> dict:
             "scale_down_threshold_cpu_pct": 25
         }
     }
+

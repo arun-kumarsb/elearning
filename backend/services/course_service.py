@@ -131,3 +131,4 @@ def delete_course(course_id: int) -> bool:
         
     execute_db("DELETE FROM courses WHERE id = %s", (course_id,))
     return True
+

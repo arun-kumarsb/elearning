@@ -345,3 +345,4 @@ Run the included automated test suite:
 python3 -m unittest tests/test_api.py
 ```
 *Result: 16/16 tests passing.*
+

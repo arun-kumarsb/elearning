@@ -50,3 +50,4 @@ xe vm-vcpu-set uuid=<VM_UUID> vcpus-number=4
 To guarantee absolute reliability and follow strict software engineering practices:
 - The core Flask backend (`backend/`) and Streamlit frontend (`frontend/`) do **not** depend on hypervisor root privileges.
 - The `xen_monitor` module can be deployed as an independent daemon or run directly on the management domain (Dom0 / XCP-ng host) or an orchestration controller.
+

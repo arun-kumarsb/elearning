@@ -102,3 +102,4 @@ def render_xen_architecture_page():
     st.markdown("<br>", unsafe_allow_html=True)
     with st.expander("🔍 View Raw Xen Cluster Telemetry & Specifications"):
         st.json(xen_data)
+

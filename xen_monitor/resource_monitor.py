@@ -186,3 +186,4 @@ if __name__ == "__main__":
     result = engine.evaluate_and_scale(sample_metrics)
     print(f"Decision: {result}")
     print("\nArchitecture successfully verified and ready for Phase 2 XenAPI coupling.")
+

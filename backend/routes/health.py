@@ -22,3 +22,4 @@ def health():
             "status": db_status
         }
     }), status_code
+

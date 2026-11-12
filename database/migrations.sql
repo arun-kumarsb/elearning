@@ -97,3 +97,4 @@ FROM students s, courses c
 WHERE s.email = 'student@example.com'
 ORDER BY c.id ASC
 LIMIT 1;
+

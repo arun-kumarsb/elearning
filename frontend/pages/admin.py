@@ -82,3 +82,4 @@ def render_admin_page():
     st.markdown("#### 🛠️ **System Diagnostics**")
     with st.expander("Inspect Raw MariaDB Connection Response"):
         st.json(health)
+
