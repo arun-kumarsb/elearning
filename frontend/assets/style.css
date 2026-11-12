@@ -1,0 +1,142 @@
+/* ==========================================================================
+   Xen-Based E-Learning Platform - Custom Blue & White Theme
+   Designed for Streamlit UI
+   ========================================================================== */
+
+/* Root color definitions */
+:root {
+    --primary-blue: #1E40AF;       /* Tailwind blue-800 */
+    --accent-blue: #2563EB;        /* Tailwind blue-600 */
+    --light-blue: #DBEAFE;         /* Tailwind blue-100 */
+    --surface-bg: #F8FAFC;         /* Light slate */
+    --card-bg: #FFFFFF;            /* Pure white */
+    --text-primary: #0F172A;       /* Slate-900 */
+    --text-secondary: #475569;     /* Slate-600 */
+    --border-color: #E2E8F0;       /* Slate-200 */
+    --success-green: #10B981;      /* Emerald */
+    --warning-amber: #F59E0B;      /* Amber */
+    --danger-red: #EF4444;         /* Red */
+}
+
+/* Overall page background adjustments */
+.stApp {
+    background-color: var(--surface-bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Custom Metric Card */
+.metric-card {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 1.25rem 1rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    text-align: center;
+}
+
+.metric-card:hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
+}
+
+.metric-card-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #475569;
+    margin-bottom: 0.5rem;
+}
+
+.metric-card-value {
+    font-size: 2.25rem;
+    font-weight: 700;
+    color: #1E40AF;
+    line-height: 1;
+}
+
+.metric-card-desc {
+    font-size: 0.75rem;
+    color: #64748B;
+    margin-top: 0.4rem;
+}
+
+/* Header & Banner Styles */
+.app-header-container {
+    background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 100%);
+    color: #FFFFFF;
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 6px -1px rgba(30, 58, 138, 0.2);
+}
+
+.app-header-title {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0;
+    color: #FFFFFF;
+}
+
+.app-header-subtitle {
+    font-size: 0.95rem;
+    opacity: 0.9;
+    margin-top: 0.3rem;
+    color: #E0E7FF;
+}
+
+.vm-badge-bar {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.vm-badge {
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #FFFFFF;
+}
+
+/* Course and Detail Cards */
+.course-card {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-left: 4px solid #2563EB;
+    border-radius: 8px;
+    padding: 1.2rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.course-card h4 {
+    margin: 0 0 0.4rem 0;
+    color: #1E3A8A;
+}
+
+.course-badge {
+    background-color: #DBEAFE;
+    color: #1E40AF;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 0.5rem;
+}
+
+/* System notice box */
+.info-box {
+    background-color: #EFF6FF;
+    border-left: 4px solid #3B82F6;
+    padding: 1rem;
+    border-radius: 4px;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+    color: #1E3A8A;
+}
