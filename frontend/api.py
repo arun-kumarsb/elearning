@@ -12,6 +12,11 @@ from typing import Dict, Any, Optional
 # Read backend URL from environment or default to local/VM address
 # Default on VM 2: http://127.0.0.1:5000/api or http://10.240.109.201:5000/api
 API_BASE_URL = os.getenv("BACKEND_API_URL", "http://127.0.0.1:5000/api").rstrip("/")
+LOCAL_FALLBACK_URL = "http://127.0.0.1:5000/api"
+
+# Configure HTTP session that bypasses proxy interference on local dev machines
+http_session = requests.Session()
+http_session.trust_env = False
 
 def get_headers() -> Dict[str, str]:
     """Return common request headers including session token if present."""
@@ -22,17 +27,18 @@ def get_headers() -> Dict[str, str]:
     return headers
 
 def safe_request(method: str, endpoint: str, data: Optional[Dict] = None, timeout: int = 5) -> Dict[str, Any]:
-    """Execute HTTP request with standardized error handling."""
+    """Execute HTTP request with standardized error handling and local fallback."""
+    global API_BASE_URL
     url = f"{API_BASE_URL}/{endpoint.lstrip('/')}"
     try:
         if method.upper() == "GET":
-            response = requests.get(url, headers=get_headers(), timeout=timeout)
+            response = http_session.get(url, headers=get_headers(), timeout=timeout)
         elif method.upper() == "POST":
-            response = requests.post(url, json=data or {}, headers=get_headers(), timeout=timeout)
+            response = http_session.post(url, json=data or {}, headers=get_headers(), timeout=timeout)
         elif method.upper() == "PUT":
-            response = requests.put(url, json=data or {}, headers=get_headers(), timeout=timeout)
+            response = http_session.put(url, json=data or {}, headers=get_headers(), timeout=timeout)
         elif method.upper() == "DELETE":
-            response = requests.delete(url, headers=get_headers(), timeout=timeout)
+            response = http_session.delete(url, headers=get_headers(), timeout=timeout)
         else:
             return {"success": False, "error": f"Unsupported HTTP method: {method}"}
 
@@ -47,6 +53,26 @@ def safe_request(method: str, endpoint: str, data: Optional[Dict] = None, timeou
 
         return res_json
     except requests.exceptions.ConnectionError:
+        # If API_BASE_URL failed and was pointing to the remote VM, auto-fallback to localhost
+        if API_BASE_URL != LOCAL_FALLBACK_URL:
+            try:
+                fallback_url = f"{LOCAL_FALLBACK_URL}/{endpoint.lstrip('/')}"
+                if method.upper() == "GET":
+                    response = http_session.get(fallback_url, headers=get_headers(), timeout=timeout)
+                elif method.upper() == "POST":
+                    response = http_session.post(fallback_url, json=data or {}, headers=get_headers(), timeout=timeout)
+                elif method.upper() == "PUT":
+                    response = http_session.put(fallback_url, json=data or {}, headers=get_headers(), timeout=timeout)
+                elif method.upper() == "DELETE":
+                    response = http_session.delete(fallback_url, headers=get_headers(), timeout=timeout)
+                else:
+                    return {"success": False, "error": f"Unsupported HTTP method: {method}"}
+
+                API_BASE_URL = LOCAL_FALLBACK_URL
+                return response.json()
+            except Exception:
+                pass
+
         return {
             "success": False, 
             "error": f"Cannot connect to Flask Backend API at {API_BASE_URL}. "
