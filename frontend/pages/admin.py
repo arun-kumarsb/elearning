@@ -22,7 +22,7 @@ def render_admin_page():
                 {'✅ System Operational - MariaDB Connected' if db_ok else '⚠️ Database Connection Warning'}
             </div>
             <div style="font-size:0.85rem; color:#475569; margin-top:4px;">
-                Application Server: <b>Alpine-Linux-New (10.240.109.201)</b> | Target Database: <b>Alpine-DB (10.240.109.248:3306)</b>
+                Application Server: <b>Alpine-Linux-New (10.240.109.51)</b> | Target Database: <b>Alpine-DB (10.240.109.248:3306)</b>
             </div>
         </div>
         """,

@@ -5,7 +5,7 @@ Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 Hypervisor: XCP-ng (Xen Cloud Platform)
 Host Management IP: 10.240.109.196
 VM 1 (Database): Alpine-DB (10.240.109.248)
-VM 2 (Application): Alpine-Linux-New (10.240.109.201)
+VM 2 (Application): Alpine-Linux-New (10.240.109.51)
 
 NOTE FOR COLLEGE PROJECT EVALUATION:
 This module provides the modular architecture, mathematical scaling model,
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     engine = DynamicAllocationEngine(config, connector)
 
     # Simulated metric evaluation
-    sample_metrics = XenVMMetrics("Alpine-Linux-New", "10.240.109.201", vcpus=2, memory_allocated_mb=2048)
+    sample_metrics = XenVMMetrics("Alpine-Linux-New", "10.240.109.51", vcpus=2, memory_allocated_mb=2048)
     sample_metrics.current_cpu_percent = 88.5 # High load trigger
     sample_metrics.current_ram_percent = 72.0
 

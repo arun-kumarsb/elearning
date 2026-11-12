@@ -1,7 +1,7 @@
 #!/bin/sh
 # ==============================================================================
 # Setup & Dependency Installation Script for Alpine Linux 3.24
-# Target VM: Alpine-Linux-New (10.240.109.201)
+# Target VM: Alpine-Linux-New (10.240.109.51)
 # ==============================================================================
 
 set -e

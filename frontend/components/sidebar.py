@@ -59,8 +59,8 @@ def render_sidebar():
             """
             <div style="font-size:0.75rem; color:#475569; line-height:1.5;">
                 • <b>Host:</b> 10.240.109.196 (XCP-ng)<br>
-                • <b>App VM:</b> 10.240.109.201:8501<br>
-                • <b>API:</b> 10.240.109.201:5000<br>
+                • <b>App VM:</b> 10.240.109.51:8501<br>
+                • <b>API:</b> 10.240.109.51:5000<br>
                 • <b>DB VM:</b> 10.240.109.248:3306<br>
                 • <b>Network:</b> Private Bridged
             </div>

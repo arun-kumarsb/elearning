@@ -23,7 +23,7 @@ class Config:
     
     # Xen Virtualization & Infrastructure Metadata
     XCP_NG_HOST = os.getenv("XCP_NG_HOST", "10.240.109.196")
-    APP_VM_IP = os.getenv("APP_VM_IP", "10.240.109.201")
+    APP_VM_IP = os.getenv("APP_VM_IP", "10.240.109.51")
     DB_VM_IP = os.getenv("DB_VM_IP", "10.240.109.248")
     XEN_ENVIRONMENT = os.getenv("XEN_ENVIRONMENT", "XCP-ng Virtualized Infrastructure")
     

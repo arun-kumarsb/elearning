@@ -89,7 +89,7 @@ def render_dashboard_page():
             """
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; padding:12px; border-radius:8px;">
                 <b style="color:#1E40AF;">Application VM:</b> Alpine-Linux-New<br>
-                <b>Private IP:</b> <code>10.240.109.201</code><br>
+                <b>Private IP:</b> <code>10.240.109.51</code><br>
                 <b>Stack:</b> Python 3.14 + Flask + Streamlit
             </div>
             """,

@@ -31,7 +31,7 @@ class TestElearningAPI(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["status"], "healthy")
-        self.assertEqual(data["app_vm"], "10.240.109.201")
+        self.assertEqual(data["app_vm"], "10.240.109.51")
 
     @patch("backend.services.auth_service.query_db")
     def test_login_admin_success(self, mock_query):

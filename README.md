@@ -30,7 +30,7 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
 | :--- | :--- | :--- | :--- | :--- |
 | **XCP-ng Host** | Hypervisor | `10.240.109.196` | 80 / 443 | XCP-ng (Xen 4.17+), XO Lite |
 | **VM 1: Alpine-DB** | Database Server | `10.240.109.248` | `3306` | Alpine Linux 3.24, MariaDB 11.8.9 |
-| **VM 2: Alpine-Linux-New** | Application Server | `10.240.109.201` | `5000` (API), `8501` (UI), `80` (Nginx) | Alpine Linux 3.24, Python 3.14, Nginx 1.30.6 |
+| **VM 2: Alpine-Linux-New** | Application Server | `10.240.109.51` | `5000` (API), `8501` (UI), `80` (Nginx) | Alpine Linux 3.24, Python 3.14, Nginx 1.30.6 |
 
 ### Multi-Tier Decoupled Architecture
 
@@ -42,7 +42,7 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
                                   │ HTTP (Port 8501 or 80)
                                   ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ VM 2: Alpine-Linux-New (10.240.109.201)                                │
+│ VM 2: Alpine-Linux-New (10.240.109.51)                                 │
 │                                                                        │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │ Streamlit Frontend (Port 8501)                                 │   │
@@ -56,7 +56,7 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
 │   └─────────────────────────────┬──────────────────────────────────┘   │
 └─────────────────────────────────┼──────────────────────────────────────┘
                                   │ TCP Port 3306 (PyMySQL)
-                                  │ Private Network: 10.240.109.201 -> 10.240.109.248
+                                  │ Private Network: 10.240.109.51 -> 10.240.109.248
                                   ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │ VM 1: Alpine-DB (10.240.109.248)                                       │
@@ -151,7 +151,7 @@ XenLearn/
 
 ## 5. Alpine Linux Installation & Deployment Guide
 
-Follow these steps on **VM 2: Alpine-Linux-New** (`10.240.109.201`).
+Follow these steps on **VM 2: Alpine-Linux-New** (`10.240.109.51`).
 
 ### Step 1: Update System & Install Dependencies
 Run in the Alpine Linux terminal:
@@ -213,12 +213,12 @@ To access the platform from another laptop connected to the same network:
 1. Open your web browser (Chrome, Firefox, Edge, Safari).
 2. Enter the URL:
    ```
-   http://10.240.109.201:8501
+   http://10.240.109.51:8501
    ```
 3. You will see the **Xen E-Learning Platform** login portal.
 
 ### Optional: Nginx Reverse Proxy (Port 80)
-If you prefer accessing via standard HTTP port 80 (`http://10.240.109.201/`):
+If you prefer accessing via standard HTTP port 80 (`http://10.240.109.51/`):
 ```bash
 cp nginx/elearning.conf /etc/nginx/http.d/elearning.conf
 rc-service nginx restart
@@ -243,71 +243,71 @@ All endpoints can be verified using `curl` from any computer:
 
 ### 1. Health Check
 ```bash
-curl -s http://10.240.109.201:5000/api/health
+curl -s http://10.240.109.51:5000/api/health
 ```
 
 ### 2. User Authentication
 ```bash
-curl -s -X POST http://10.240.109.201:5000/api/login \
+curl -s -X POST http://10.240.109.51:5000/api/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@elearning.local", "password":"Admin@123"}'
 ```
 
 ### 3. Dashboard Real Metrics
 ```bash
-curl -s http://10.240.109.201:5000/api/dashboard
+curl -s http://10.240.109.51:5000/api/dashboard
 ```
 
 ### 4. Course Management
 ```bash
 # List all courses
-curl -s http://10.240.109.201:5000/api/courses
+curl -s http://10.240.109.51:5000/api/courses
 
 # Create a new course
-curl -s -X POST http://10.240.109.201:5000/api/courses \
+curl -s -X POST http://10.240.109.51:5000/api/courses \
   -H "Content-Type: application/json" \
   -d '{"course_code":"CS-201", "title":"Cloud Virtualization", "description":"Hands-on Xen and XCP-ng"}'
 
 # Update a course
-curl -s -X PUT http://10.240.109.201:5000/api/courses/1 \
+curl -s -X PUT http://10.240.109.51:5000/api/courses/1 \
   -H "Content-Type: application/json" \
   -d '{"course_code":"CS-101", "title":"Introduction to E-Learning (Updated)", "description":"Updated description"}'
 
 # Delete a course
-curl -s -X DELETE http://10.240.109.201:5000/api/courses/2
+curl -s -X DELETE http://10.240.109.51:5000/api/courses/2
 ```
 
 ### 5. Student Management
 ```bash
 # List all students
-curl -s http://10.240.109.201:5000/api/students
+curl -s http://10.240.109.51:5000/api/students
 
 # Register a student
-curl -s -X POST http://10.240.109.201:5000/api/students \
+curl -s -X POST http://10.240.109.51:5000/api/students \
   -H "Content-Type: application/json" \
   -d '{"name":"Alice Smith", "email":"alice@example.com", "password":"Student@123"}'
 
 # Inspect student details & enrolled coursework
-curl -s http://10.240.109.201:5000/api/students/1
+curl -s http://10.240.109.51:5000/api/students/1
 ```
 
 ### 6. Course Enrollment
 ```bash
 # Enroll student 1 into course 1
-curl -s -X POST http://10.240.109.201:5000/api/enrollments \
+curl -s -X POST http://10.240.109.51:5000/api/enrollments \
   -H "Content-Type: application/json" \
   -d '{"student_id": 1, "course_id": 1}'
 
 # View all enrollments
-curl -s http://10.240.109.201:5000/api/enrollments
+curl -s http://10.240.109.51:5000/api/enrollments
 
 # View student-specific enrollments
-curl -s http://10.240.109.201:5000/api/students/1/enrollments
+curl -s http://10.240.109.51:5000/api/students/1/enrollments
 ```
 
 ### 7. Xen Virtualization Telemetry
 ```bash
-curl -s http://10.240.109.201:5000/api/xen/status
+curl -s http://10.240.109.51:5000/api/xen/status
 ```
 
 ---

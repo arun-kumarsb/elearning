@@ -25,7 +25,7 @@ def render_system_header():
                 Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
             </div>
             <div class="vm-badge-bar">
-                <span class="vm-badge">🖥️ App VM: Alpine-Linux-New (10.240.109.201)</span>
+                <span class="vm-badge">🖥️ App VM: Alpine-Linux-New (10.240.109.51)</span>
                 <span class="vm-badge">🗄️ DB VM: Alpine-DB (10.240.109.248)</span>
                 <span class="vm-badge">⚙️ Hypervisor: XCP-ng / Xen (10.240.109.196)</span>
             </div>

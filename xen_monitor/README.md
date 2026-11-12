@@ -4,7 +4,7 @@
 - **Title:** Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 - **Platform:** XCP-ng (Xen Cloud Platform)
 - **Host Management IP:** `10.240.109.196` (XO Lite / XAPI)
-- **Application VM:** Alpine-Linux-New (`10.240.109.201`)
+- **Application VM:** Alpine-Linux-New (`10.240.109.51`)
 - **Database VM:** Alpine-DB (`10.240.109.248`)
 
 ---

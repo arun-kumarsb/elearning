@@ -31,7 +31,7 @@ def render_xen_architecture_page():
         st.markdown(
             """
             - **Operating System:** Alpine Linux 3.24
-            - **IP Address:** `10.240.109.201`
+            - **IP Address:** `10.240.109.51`
             - **Python Version:** 3.14.x
             - **Services Running:**
               - **Streamlit Frontend:** Port `8501`

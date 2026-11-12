@@ -1,7 +1,7 @@
 #!/bin/sh
 # ==============================================================================
 # Startup Script: Streamlit Frontend Web App
-# Runs on: Alpine-Linux-New (10.240.109.201)
+# Runs on: Alpine-Linux-New (10.240.109.51)
 # Port: 8501 (Accessible from other laptops across network)
 # ==============================================================================
 
@@ -14,13 +14,13 @@ if [ -d "venv" ]; then
 fi
 
 export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-export BACKEND_API_URL="http://10.240.109.201:5000/api"
+export BACKEND_API_URL="http://10.240.109.51:5000/api"
 
 echo "=================================================="
 echo "Starting Xen E-Learning Streamlit Frontend..."
 echo "Binding Address: 0.0.0.0 | Port: 8501"
 echo "Backend API Target: $BACKEND_API_URL"
-echo "Accessible at: http://10.240.109.201:8501"
+echo "Accessible at: http://10.240.109.51:8501"
 echo "=================================================="
 
 exec streamlit run frontend/app.py \
