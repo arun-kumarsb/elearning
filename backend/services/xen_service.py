@@ -74,8 +74,7 @@ def get_xen_cluster_metadata() -> dict:
     status = monitor.get_status()
 
     return {
-        "phase": "Phase 2: Real-Time Xen/XCP-ng Resource Monitoring & Elasticity Engine",
-        "next_phase": "Phase 3: Automated Dynamic Actuation & Closed-Loop Hypervisor Scaling",
+        "phase": "Phase 3: Dynamic CPU and RAM Resource Allocation",
         "monitoring_status": status["status"],
         "monitoring_connected": status["connected"],
         "virtualization": {
@@ -105,9 +104,17 @@ def get_xen_cluster_metadata() -> dict:
         "elasticity_thresholds": {
             "cpu_scale_up_threshold_pct": Config.CPU_SCALE_UP_THRESHOLD,
             "cpu_scale_down_threshold_pct": Config.CPU_SCALE_DOWN_THRESHOLD,
+            "min_vcpus": Config.MIN_VCPUS,
+            "max_vcpus": Config.MAX_VCPUS,
             "ram_scale_up_threshold_pct": Config.RAM_SCALE_UP_THRESHOLD,
+            "ram_scale_down_threshold_pct": Config.RAM_SCALE_DOWN_THRESHOLD,
+            "ram_increment_mb": Config.RAM_INCREMENT_MB,
+            "ram_min_mb": Config.RAM_MIN_MB,
+            "ram_max_mb": Config.RAM_MAX_MB,
+            "cooldown_period_sec": Config.COOLDOWN_PERIOD,
+            "consecutive_breaches": Config.CONSECUTIVE_BREACH_THRESHOLD,
             "polling_interval_sec": Config.MONITOR_INTERVAL,
-            "mode": Config.MONITOR_MODE
+            "mode": getattr(Config, "ALLOCATION_MODE", "manual")
         }
     }
 
@@ -140,3 +147,47 @@ def get_metrics_history(vm_name: Optional[str] = None, limit: int = 50) -> List[
     """Retrieve persistent historical telemetry from database."""
     monitor = get_monitor_instance()
     return monitor.get_history(vm_name=vm_name, limit=limit)
+
+# -------------------------------------------------------------
+# Phase 3: Dynamic Resource Allocation Service Functions
+# -------------------------------------------------------------
+def get_allocation_controller_status() -> Dict[str, Any]:
+    """Retrieve dynamic allocation controller state, limits, and active recommendations."""
+    monitor = get_monitor_instance()
+    return monitor.get_allocation_status()
+
+def get_allocation_recommendations() -> Dict[str, Any]:
+    """Retrieve latest scaling recommendations across all monitored VMs."""
+    monitor = get_monitor_instance()
+    return monitor.get_allocation_recommendations()
+
+def get_allocation_history(vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve allocation audit trail from resource_allocation_history table."""
+    monitor = get_monitor_instance()
+    return monitor.get_allocation_history(vm_name=vm_name, limit=limit)
+
+def set_automation_mode(mode: str) -> str:
+    """Set automation mode to 'auto' or 'manual'."""
+    monitor = get_monitor_instance()
+    return monitor.set_allocation_mode(mode)
+
+def set_emergency_stop_status(enabled: bool) -> bool:
+    """Engage or disengage emergency stop."""
+    monitor = get_monitor_instance()
+    return monitor.set_emergency_stop(enabled)
+
+def apply_manual_cpu_allocation(vm_name: str, vcpus: int, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
+    """Perform administrator-initiated live vCPU allocation."""
+    monitor = get_monitor_instance()
+    return monitor.apply_manual_cpu(vm_name, vcpus, reason=reason, initiated_by=initiated_by)
+
+def apply_manual_ram_allocation(vm_name: str, ram_mb: float, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
+    """Perform administrator-initiated dynamic RAM ballooning."""
+    monitor = get_monitor_instance()
+    return monitor.apply_manual_ram(vm_name, ram_mb, reason=reason, initiated_by=initiated_by)
+
+def apply_pending_recommendation(vm_name: str, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Apply current scaling recommendation for a specific VM."""
+    monitor = get_monitor_instance()
+    return monitor.apply_recommended_action(vm_name, initiated_by=initiated_by)
+

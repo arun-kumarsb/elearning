@@ -1,7 +1,7 @@
 """
-Xen Resource Monitoring Scheduler & Engine
+Xen Resource Monitoring Scheduler & Dynamic Allocation Controller
 Coordinates XAPI communication, metric normalization, historical storage,
-and dynamic allocation recommendation evaluations.
+intelligent elasticity evaluation, and safe dynamic resource actuation.
 """
 
 import time
@@ -63,6 +63,20 @@ class XenResourceMonitor:
         if cls._instance is None:
             cls._instance = cls(config)
         return cls._instance
+
+    def set_allocation_mode(self, mode: str) -> str:
+        """Switch allocation mode between 'manual' and 'auto'."""
+        clean_mode = mode.lower().strip()
+        if clean_mode in ("manual", "auto"):
+            self.config.allocation_mode = clean_mode
+            logger.info(f"Allocation mode updated to: {clean_mode}")
+            return clean_mode
+        raise ValueError(f"Invalid allocation mode '{mode}'. Must be 'manual' or 'auto'.")
+
+    def set_emergency_stop(self, enabled: bool) -> bool:
+        """Toggle emergency stop status."""
+        self.allocation_engine.set_emergency_stop(enabled)
+        return self.allocation_engine.emergency_stop
 
     def start(self):
         """Start the background monitoring thread."""
@@ -155,8 +169,8 @@ class XenResourceMonitor:
                 if actual_app_name != self.config.app_vm_name:
                     norm_vms[actual_app_name] = norm_app
 
-                # Elasticity recommendation (Phase 3 Preparation - read-only)
-                recommendations[actual_app_name] = self.allocation_engine.evaluate_vm(norm_app)
+                # Elasticity recommendation
+                recommendations[actual_app_name] = self.allocation_engine.evaluate_vm(norm_app, host_metrics=norm_host)
                 # Store historical metric
                 self._persist_metric(norm_app)
             else:
@@ -179,8 +193,8 @@ class XenResourceMonitor:
                 if actual_db_name != self.config.db_vm_name:
                     norm_vms[actual_db_name] = norm_db
 
-                # Elasticity recommendation (Phase 3 Preparation - read-only)
-                recommendations[actual_db_name] = self.allocation_engine.evaluate_vm(norm_db)
+                # Elasticity recommendation
+                recommendations[actual_db_name] = self.allocation_engine.evaluate_vm(norm_db, host_metrics=norm_host)
                 # Store historical metric
                 self._persist_metric(norm_db)
             else:
@@ -194,9 +208,65 @@ class XenResourceMonitor:
             # Persist host metric
             self._persist_host_metric(norm_host)
 
-            # Persist recommendations
+            # Persist recommendations history
             for rec in recommendations.values():
                 self._persist_recommendation(rec)
+
+            # ---------------------------------------------------------
+            # AUTOMATED ACTUATION (Phase 3 Closed-Loop Execution)
+            # Only executes if ALLOCATION_MODE is 'auto' and emergency stop is NOT engaged
+            # ---------------------------------------------------------
+            if self.config.allocation_mode.lower() == "auto" and not self.allocation_engine.emergency_stop:
+                for target_vm_name, rec in recommendations.items():
+                    # Check CPU automated scaling
+                    if rec.get("cpu_action") in ("SCALE_UP", "SCALE_DOWN"):
+                        target_vcpus = rec.get("recommended_vcpus")
+                        if target_vcpus and target_vcpus != rec.get("current_vcpus"):
+                            logger.info(f"Auto-actuating CPU scaling for '{target_vm_name}': {rec.get('current_vcpus')} -> {target_vcpus}")
+                            res = self.client.set_vm_vcpus(target_vm_name, target_vcpus)
+                            status = "success" if res.get("success") else "failed"
+                            err = res.get("error")
+                            act_val = res.get("actual_value", rec.get("current_vcpus")) if status == "success" else None
+                            if status == "success":
+                                self.allocation_engine.record_action_applied(target_vm_name, "cpu")
+                            self._persist_allocation_action({
+                                "vm_name": target_vm_name,
+                                "vm_uuid": rec.get("vm_uuid"),
+                                "resource_type": "cpu",
+                                "previous_value": rec.get("current_vcpus"),
+                                "requested_value": target_vcpus,
+                                "actual_value": act_val,
+                                "trigger_reason": rec.get("rationale"),
+                                "action_type": "auto_scale",
+                                "execution_status": status,
+                                "error_message": err,
+                                "initiated_by": "auto"
+                            })
+
+                    # Check RAM automated scaling
+                    if rec.get("ram_action") in ("SCALE_UP", "SCALE_DOWN"):
+                        target_ram = rec.get("recommended_ram_mb")
+                        if target_ram and target_ram != rec.get("current_ram_mb"):
+                            logger.info(f"Auto-actuating RAM ballooning for '{target_vm_name}': {rec.get('current_ram_mb')} -> {target_ram} MB")
+                            res = self.client.set_vm_dynamic_memory(target_vm_name, target_ram)
+                            status = "success" if res.get("success") else "failed"
+                            err = res.get("error")
+                            act_val = res.get("actual_value", rec.get("current_ram_mb")) if status == "success" else None
+                            if status == "success":
+                                self.allocation_engine.record_action_applied(target_vm_name, "ram")
+                            self._persist_allocation_action({
+                                "vm_name": target_vm_name,
+                                "vm_uuid": rec.get("vm_uuid"),
+                                "resource_type": "ram",
+                                "previous_value": rec.get("current_ram_mb"),
+                                "requested_value": target_ram,
+                                "actual_value": act_val,
+                                "trigger_reason": rec.get("rationale"),
+                                "action_type": "auto_scale",
+                                "execution_status": status,
+                                "error_message": err,
+                                "initiated_by": "auto"
+                            })
 
             self.last_successful_update = now
             self.consecutive_failures = 0
@@ -217,6 +287,8 @@ class XenResourceMonitor:
                         for v in all_vms
                     ],
                     "recommendations": recommendations,
+                    "allocation_mode": self.config.allocation_mode,
+                    "emergency_stop": self.allocation_engine.emergency_stop,
                     "error": None
                 }
 
@@ -242,6 +314,133 @@ class XenResourceMonitor:
                     "error": self.last_error
                 }
             return self._latest_state
+
+    # -----------------------------------------------------------------
+    # MANUAL AND RECOMMENDED SCALING ACTUATION METHODS
+    # -----------------------------------------------------------------
+    def apply_manual_cpu(self, vm_identifier: str, target_vcpus: int, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
+        """Manually actuate vCPU modification via XenAPI and record audit log."""
+        res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
+        vm_name = res.get("vm_name") or vm_identifier
+        vm_uuid = res.get("vm_uuid")
+        status = "success" if res.get("success") else "failed"
+
+        if status == "success":
+            self.allocation_engine.record_action_applied(vm_name, "cpu")
+
+        self._persist_allocation_action({
+            "vm_name": vm_name,
+            "vm_uuid": vm_uuid,
+            "resource_type": "cpu",
+            "previous_value": res.get("previous_value"),
+            "requested_value": target_vcpus,
+            "actual_value": res.get("actual_value"),
+            "trigger_reason": reason,
+            "action_type": "manual_cpu",
+            "execution_status": status,
+            "error_message": res.get("error"),
+            "initiated_by": initiated_by
+        })
+        return res
+
+    def apply_manual_ram(self, vm_identifier: str, target_ram_mb: float, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
+        """Manually actuate dynamic memory ballooning via XenAPI and record audit log."""
+        res = self.client.set_vm_dynamic_memory(vm_identifier, target_ram_mb)
+        vm_name = res.get("vm_name") or vm_identifier
+        vm_uuid = res.get("vm_uuid")
+        status = "success" if res.get("success") else "failed"
+
+        if status == "success":
+            self.allocation_engine.record_action_applied(vm_name, "ram")
+
+        self._persist_allocation_action({
+            "vm_name": vm_name,
+            "vm_uuid": vm_uuid,
+            "resource_type": "ram",
+            "previous_value": res.get("previous_value"),
+            "requested_value": target_ram_mb,
+            "actual_value": res.get("actual_value"),
+            "trigger_reason": reason,
+            "action_type": "manual_ram",
+            "execution_status": status,
+            "error_message": res.get("error"),
+            "initiated_by": initiated_by
+        })
+        return res
+
+    def apply_recommended_action(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
+        """Apply pending recommendation for a specific VM."""
+        state = self.get_latest_metrics()
+        recs = state.get("recommendations", {})
+
+        target_rec = None
+        for k, r in recs.items():
+            if k.lower() == vm_identifier.lower() or r.get("vm_uuid") == vm_identifier:
+                target_rec = r
+                break
+
+        if not target_rec:
+            return {"success": False, "error": f"No active recommendations found for VM '{vm_identifier}'."}
+
+        actions_performed = []
+        # CPU
+        if target_rec.get("cpu_action") in ("SCALE_UP", "SCALE_DOWN"):
+            cpu_res = self.apply_manual_cpu(
+                vm_identifier=target_rec.get("vm_name", vm_identifier),
+                target_vcpus=target_rec["recommended_vcpus"],
+                reason=f"Applied recommendation: {target_rec.get('rationale')}",
+                initiated_by=initiated_by
+            )
+            actions_performed.append({"resource": "cpu", "result": cpu_res})
+
+        # RAM
+        if target_rec.get("ram_action") in ("SCALE_UP", "SCALE_DOWN"):
+            ram_res = self.apply_manual_ram(
+                vm_identifier=target_rec.get("vm_name", vm_identifier),
+                target_ram_mb=target_rec["recommended_ram_mb"],
+                reason=f"Applied recommendation: {target_rec.get('rationale')}",
+                initiated_by=initiated_by
+            )
+            actions_performed.append({"resource": "ram", "result": ram_res})
+
+        if not actions_performed:
+            return {"success": True, "message": "No actionable scaling recommendations pending for this VM.", "actions": []}
+
+        all_ok = all(a["result"].get("success") for a in actions_performed)
+        return {
+            "success": all_ok,
+            "message": f"Applied {len(actions_performed)} recommended scaling action(s).",
+            "actions": actions_performed
+        }
+
+    # -----------------------------------------------------------------
+    # PERSISTENCE METHODS
+    # -----------------------------------------------------------------
+    def _persist_allocation_action(self, action: Dict[str, Any]):
+        """Persist scaling action audit record into resource_allocation_history table."""
+        try:
+            sql = """
+                INSERT INTO resource_allocation_history
+                (vm_name, vm_uuid, resource_type, previous_value, requested_value, actual_value,
+                 trigger_reason, action_type, execution_status, error_message, initiated_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            execute_db(sql, (
+                action.get("vm_name"),
+                action.get("vm_uuid"),
+                action.get("resource_type"),
+                action.get("previous_value"),
+                action.get("requested_value"),
+                action.get("actual_value"),
+                action.get("trigger_reason"),
+                action.get("action_type", "auto_scale"),
+                action.get("execution_status", "success"),
+                action.get("error_message"),
+                action.get("initiated_by", "system")
+            ))
+            logger.info(f"Persisted allocation audit log: {action.get('action_type')} on {action.get('vm_name')} ({action.get('execution_status')})")
+        except Exception as e:
+            logger.warning(f"Failed to persist allocation action audit log: {e}")
 
     def _persist_metric(self, vm_norm: Dict[str, Any]):
         """Save a single normalized VM telemetry record into MariaDB/SQLite."""
@@ -314,7 +513,9 @@ class XenResourceMonitor:
         except Exception as e:
             logger.warning(f"Failed to persist allocation decision: {e}")
 
-    # Query methods for Flask API
+    # -----------------------------------------------------------------
+    # QUERY METHODS FOR FLASK API
+    # -----------------------------------------------------------------
     def get_latest_metrics(self) -> Dict[str, Any]:
         """Return cached snapshot of latest live metrics."""
         with self._lock:
@@ -334,10 +535,8 @@ class XenResourceMonitor:
     def get_vm_metrics(self, vm_identifier: str) -> Optional[Dict[str, Any]]:
         state = self.get_latest_metrics()
         vms = state.get("vms", {})
-        # Search by exact name
         if vm_identifier in vms:
             return vms[vm_identifier]
-        # Search by uuid or lowercase
         for k, v in vms.items():
             if isinstance(v, dict):
                 if v.get("uuid") == vm_identifier or k.lower() == vm_identifier.lower():
@@ -385,7 +584,6 @@ class XenResourceMonitor:
             if not rows:
                 return []
 
-            # Format datetimes
             formatted = []
             for r in rows:
                 row_dict = dict(r)
@@ -395,6 +593,78 @@ class XenResourceMonitor:
             return formatted
         except Exception as e:
             logger.warning(f"Database query error in get_history: {e}")
+            return []
+
+    def get_allocation_status(self) -> Dict[str, Any]:
+        """Return dynamic allocation controller configuration and state."""
+        with self._lock:
+            state = dict(self._latest_state)
+
+        recs = state.get("recommendations", {})
+        return {
+            "allocation_mode": self.config.allocation_mode,
+            "emergency_stop": self.allocation_engine.emergency_stop,
+            "poll_interval_sec": self.config.poll_interval_sec,
+            "cooldown_period_sec": self.config.cooldown_period_sec,
+            "consecutive_breach_threshold": self.config.consecutive_breach_threshold,
+            "thresholds": {
+                "cpu_scale_up_threshold": self.config.cpu_scale_up_threshold,
+                "cpu_scale_down_threshold": self.config.cpu_scale_down_threshold,
+                "min_vcpus": self.config.min_vcpus,
+                "max_vcpus": self.config.max_vcpus,
+                "ram_scale_up_threshold": self.config.ram_scale_up_threshold,
+                "ram_scale_down_threshold": self.config.ram_scale_down_threshold,
+                "ram_increment_mb": self.config.ram_increment_mb,
+                "min_ram_mb": self.config.min_ram_mb,
+                "max_ram_mb": self.config.max_ram_mb
+            },
+            "recommendations_count": len(recs),
+            "recommendations": recs
+        }
+
+    def get_allocation_recommendations(self) -> Dict[str, Any]:
+        """Return latest recommendations for all monitored VMs."""
+        state = self.get_latest_metrics()
+        return state.get("recommendations", {})
+
+    def get_allocation_history(self, vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Query allocation history from resource_allocation_history table."""
+        try:
+            safe_limit = min(200, max(1, int(limit)))
+            if vm_name:
+                sql = f"""
+                    SELECT id, vm_name, vm_uuid, resource_type, previous_value, requested_value,
+                           actual_value, trigger_reason, action_type, execution_status,
+                           error_message, initiated_by, created_at
+                    FROM resource_allocation_history
+                    WHERE LOWER(vm_name) = LOWER(%s)
+                    ORDER BY created_at DESC
+                    LIMIT {safe_limit}
+                """
+                rows = query_db(sql, (vm_name,))
+            else:
+                sql = f"""
+                    SELECT id, vm_name, vm_uuid, resource_type, previous_value, requested_value,
+                           actual_value, trigger_reason, action_type, execution_status,
+                           error_message, initiated_by, created_at
+                    FROM resource_allocation_history
+                    ORDER BY created_at DESC
+                    LIMIT {safe_limit}
+                """
+                rows = query_db(sql)
+
+            if not rows:
+                return []
+
+            formatted = []
+            for r in rows:
+                row_dict = dict(r)
+                if row_dict.get("created_at"):
+                    row_dict["created_at"] = str(row_dict["created_at"])
+                formatted.append(row_dict)
+            return formatted
+        except Exception as e:
+            logger.warning(f"Database query error in get_allocation_history: {e}")
             return []
 
 

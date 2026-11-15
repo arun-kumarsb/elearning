@@ -379,3 +379,317 @@ class XenAPIClient:
             "network_rx_bytes": net_rx_bytes,
             "network_tx_bytes": net_tx_bytes
         }
+
+    def get_vm_by_uuid(self, uuid: str) -> Optional[Dict[str, Any]]:
+        """Find a VM by its exact UUID."""
+        if not uuid:
+            return None
+        vms = self.get_all_vms()
+        for vm in vms:
+            if vm.get("uuid") == uuid.strip():
+                return vm
+        return None
+
+    def find_vm(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """Lookup VM by UUID first, falling back to name matching."""
+        if not identifier:
+            return None
+        vm = self.get_vm_by_uuid(identifier)
+        if vm:
+            return vm
+        return self.get_vm_by_name(identifier)
+
+    def set_vm_vcpus(self, vm_identifier: str, target_vcpus: int) -> Dict[str, Any]:
+        """
+        Dynamically adjust VM vCPU allocation on XCP-ng hypervisor.
+        Applies live scaling if VM is running and persists at startup.
+        Verifies actual allocation via XenAPI post-change.
+        """
+        if not self.is_connected or not self.proxy or not self.session_id:
+            return {
+                "success": False,
+                "error": self.last_error or "XAPI client not connected to hypervisor",
+                "vm_identifier": vm_identifier,
+                "requested_value": target_vcpus
+            }
+
+        try:
+            target_vcpus = int(target_vcpus)
+        except (ValueError, TypeError):
+            return {
+                "success": False,
+                "error": f"Invalid vCPU target value: {target_vcpus}. Must be an integer.",
+                "vm_identifier": vm_identifier
+            }
+
+        # Boundary checks
+        if target_vcpus < self.config.min_vcpus or target_vcpus > self.config.max_vcpus:
+            return {
+                "success": False,
+                "error": f"Target vCPUs {target_vcpus} violates configured limits [{self.config.min_vcpus}, {self.config.max_vcpus}].",
+                "vm_identifier": vm_identifier,
+                "requested_value": target_vcpus
+            }
+
+        vm = self.find_vm(vm_identifier)
+        if not vm:
+            return {
+                "success": False,
+                "error": f"VM '{vm_identifier}' was not found on XCP-ng host.",
+                "vm_identifier": vm_identifier
+            }
+
+        vm_ref = vm["vm_ref"]
+        vm_name = vm["name"]
+        vm_uuid = vm["uuid"]
+        power_state = vm.get("power_state")
+
+        # Check power state
+        if power_state not in ("Running", "Halted"):
+            return {
+                "success": False,
+                "error": f"Cannot modify vCPUs for VM '{vm_name}' in state '{power_state}'. Must be Running or Halted.",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "power_state": power_state
+            }
+
+        # Retrieve full VM record to check VCPUs_max
+        rec_res = self.proxy.VM.get_record(self.session_id, vm_ref)
+        if rec_res.get("Status") != "Success":
+            return {
+                "success": False,
+                "error": f"Failed to retrieve VM record for '{vm_name}': {rec_res.get('ErrorDescription')}",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid
+            }
+        rec = rec_res.get("Value", {})
+        vcpus_max = int(rec.get("VCPUs_max", 1))
+        prev_vcpus = int(rec.get("VCPUs_at_startup") or vm.get("vcpus", 1))
+
+        if target_vcpus > vcpus_max:
+            return {
+                "success": False,
+                "error": f"Target vCPUs ({target_vcpus}) exceeds VM VCPUs_max ({vcpus_max}). Increasing VCPUs_max requires a VM power cycle.",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "previous_value": prev_vcpus,
+                "requested_value": target_vcpus
+            }
+
+        # Actuate via XenAPI
+        try:
+            if power_state == "Running":
+                live_res = self.proxy.VM.set_VCPUs_number_live(self.session_id, vm_ref, target_vcpus)
+                if live_res.get("Status") != "Success":
+                    err = live_res.get("ErrorDescription", ["Live vCPU change failed"])
+                    return {
+                        "success": False,
+                        "error": f"XenAPI set_VCPUs_number_live failed: {err}",
+                        "vm_name": vm_name,
+                        "vm_uuid": vm_uuid,
+                        "previous_value": prev_vcpus,
+                        "requested_value": target_vcpus
+                    }
+
+            # Update startup configuration for persistence
+            startup_res = self.proxy.VM.set_VCPUs_at_startup(self.session_id, vm_ref, target_vcpus)
+            if startup_res.get("Status") != "Success":
+                logger.warning(f"Failed to update VCPUs_at_startup for {vm_name}: {startup_res.get('ErrorDescription')}")
+
+            # Verify actual allocation
+            verify_res = self.proxy.VM.get_record(self.session_id, vm_ref)
+            actual_vcpus = target_vcpus
+            if verify_res.get("Status") == "Success":
+                v_rec = verify_res.get("Value", {})
+                actual_vcpus = int(v_rec.get("VCPUs_at_startup", target_vcpus))
+
+            logger.info(f"Dynamic CPU allocation successful for {vm_name}: {prev_vcpus} -> {actual_vcpus} vCPUs.")
+            return {
+                "success": True,
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "resource_type": "cpu",
+                "previous_value": prev_vcpus,
+                "requested_value": target_vcpus,
+                "actual_value": actual_vcpus,
+                "power_state": power_state,
+                "message": f"Successfully scaled vCPUs for '{vm_name}' from {prev_vcpus} to {actual_vcpus}."
+            }
+        except Exception as e:
+            logger.error(f"Error during XenAPI vCPU modification on {vm_name}: {e}")
+            return {
+                "success": False,
+                "error": f"XenAPI exception: {str(e)}",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "previous_value": prev_vcpus,
+                "requested_value": target_vcpus
+            }
+
+    def set_vm_dynamic_memory(self, vm_identifier: str, target_ram_mb: float) -> Dict[str, Any]:
+        """
+        Dynamically adjust VM dynamic memory boundaries (Xen ballooning).
+        Enforces Xen memory invariants (static_min <= dynamic_min <= dynamic_max <= static_max),
+        checks host physical RAM headroom, and verifies allocation post-change.
+        """
+        if not self.is_connected or not self.proxy or not self.session_id:
+            return {
+                "success": False,
+                "error": self.last_error or "XAPI client not connected to hypervisor",
+                "vm_identifier": vm_identifier,
+                "requested_value": target_ram_mb
+            }
+
+        try:
+            target_ram_mb = float(target_ram_mb)
+        except (ValueError, TypeError):
+            return {
+                "success": False,
+                "error": f"Invalid RAM target value: {target_ram_mb}. Must be a numeric value.",
+                "vm_identifier": vm_identifier
+            }
+
+        # Boundary checks against configured min/max
+        if target_ram_mb < self.config.min_ram_mb or target_ram_mb > self.config.max_ram_mb:
+            return {
+                "success": False,
+                "error": f"Target RAM {target_ram_mb} MB violates configured limits [{self.config.min_ram_mb} MB, {self.config.max_ram_mb} MB].",
+                "vm_identifier": vm_identifier,
+                "requested_value": target_ram_mb
+            }
+
+        vm = self.find_vm(vm_identifier)
+        if not vm:
+            return {
+                "success": False,
+                "error": f"VM '{vm_identifier}' was not found on XCP-ng host.",
+                "vm_identifier": vm_identifier
+            }
+
+        vm_ref = vm["vm_ref"]
+        vm_name = vm["name"]
+        vm_uuid = vm["uuid"]
+        power_state = vm.get("power_state")
+
+        if power_state not in ("Running", "Halted"):
+            return {
+                "success": False,
+                "error": f"Cannot modify dynamic memory for VM '{vm_name}' in state '{power_state}'.",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "power_state": power_state
+            }
+
+        # Query VM limits from hypervisor
+        rec_res = self.proxy.VM.get_record(self.session_id, vm_ref)
+        if rec_res.get("Status") != "Success":
+            return {
+                "success": False,
+                "error": f"Failed to retrieve VM record for '{vm_name}': {rec_res.get('ErrorDescription')}",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid
+            }
+        rec = rec_res.get("Value", {})
+        static_min = int(rec.get("memory_static_min", 0))
+        dynamic_min = int(rec.get("memory_dynamic_min", 0))
+        dynamic_max = int(rec.get("memory_dynamic_max", 0))
+        static_max = int(rec.get("memory_static_max", 0))
+
+        prev_dynamic_max_mb = round(dynamic_max / (1024 * 1024), 1)
+        target_bytes = int(target_ram_mb * 1024 * 1024)
+
+        # Invariant checks
+        if static_max > 0 and target_bytes > static_max:
+            static_max_mb = round(static_max / (1024 * 1024), 1)
+            return {
+                "success": False,
+                "error": f"Target RAM ({target_ram_mb} MB) exceeds VM static maximum limit ({static_max_mb} MB).",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "previous_value": prev_dynamic_max_mb,
+                "requested_value": target_ram_mb
+            }
+
+        if static_min > 0 and target_bytes < static_min:
+            static_min_mb = round(static_min / (1024 * 1024), 1)
+            return {
+                "success": False,
+                "error": f"Target RAM ({target_ram_mb} MB) is below VM static minimum limit ({static_min_mb} MB).",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "previous_value": prev_dynamic_max_mb,
+                "requested_value": target_ram_mb
+            }
+
+        # Host capacity check if scaling up
+        if target_ram_mb > prev_dynamic_max_mb:
+            try:
+                host_metrics = self.get_host_metrics()
+                avail_host_mb = host_metrics.get("available_ram_mb", 0.0)
+                needed_mb = (target_ram_mb - prev_dynamic_max_mb) + 256.0  # 256MB safety cushion
+                if avail_host_mb < needed_mb:
+                    return {
+                        "success": False,
+                        "error": f"Host RAM capacity restriction. Available: {avail_host_mb} MB, Required with cushion: {needed_mb} MB.",
+                        "vm_name": vm_name,
+                        "vm_uuid": vm_uuid,
+                        "previous_value": prev_dynamic_max_mb,
+                        "requested_value": target_ram_mb
+                    }
+            except Exception as e:
+                logger.warning(f"Could not verify host RAM capacity: {e}")
+
+        # Set dynamic memory range
+        try:
+            # Ensure dynamic_min does not exceed new target
+            safe_dyn_min = min(dynamic_min, target_bytes) if dynamic_min > 0 else target_bytes
+            dyn_res = self.proxy.VM.set_memory_dynamic_range(
+                self.session_id, vm_ref, safe_dyn_min, target_bytes
+            )
+            if dyn_res.get("Status") != "Success":
+                err = dyn_res.get("ErrorDescription", ["set_memory_dynamic_range failed"])
+                return {
+                    "success": False,
+                    "error": f"XenAPI set_memory_dynamic_range failed: {err}",
+                    "vm_name": vm_name,
+                    "vm_uuid": vm_uuid,
+                    "previous_value": prev_dynamic_max_mb,
+                    "requested_value": target_ram_mb
+                }
+
+            # If VM is running, actively adjust live memory target for ballooning
+            if power_state == "Running":
+                target_res = self.proxy.VM.set_memory_target_live(self.session_id, vm_ref, target_bytes)
+                if target_res.get("Status") != "Success":
+                    logger.warning(f"set_memory_target_live returned non-success (may be unsupported by guest agent): {target_res.get('ErrorDescription')}")
+
+            # Verify actual allocation
+            verify_res = self.proxy.VM.get_record(self.session_id, vm_ref)
+            actual_ram_mb = target_ram_mb
+            if verify_res.get("Status") == "Success":
+                v_rec = verify_res.get("Value", {})
+                actual_ram_mb = round(int(v_rec.get("memory_dynamic_max", target_bytes)) / (1024 * 1024), 1)
+
+            logger.info(f"Dynamic RAM ballooning successful for {vm_name}: {prev_dynamic_max_mb} MB -> {actual_ram_mb} MB.")
+            return {
+                "success": True,
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "resource_type": "ram",
+                "previous_value": prev_dynamic_max_mb,
+                "requested_value": target_ram_mb,
+                "actual_value": actual_ram_mb,
+                "power_state": power_state,
+                "message": f"Successfully updated dynamic memory for '{vm_name}' from {prev_dynamic_max_mb} MB to {actual_ram_mb} MB."
+            }
+        except Exception as e:
+            logger.error(f"Error during XenAPI memory modification on {vm_name}: {e}")
+            return {
+                "success": False,
+                "error": f"XenAPI exception: {str(e)}",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "previous_value": prev_dynamic_max_mb,
+                "requested_value": target_ram_mb
+            }

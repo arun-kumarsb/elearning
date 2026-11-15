@@ -1,4 +1,6 @@
+from functools import wraps
 from flask import Blueprint, jsonify, request
+from backend.services.auth_service import verify_session_token
 from backend.services.xen_service import (
     get_xen_cluster_metadata,
     read_local_vm_telemetry,
@@ -7,16 +9,41 @@ from backend.services.xen_service import (
     get_discovered_vms,
     get_single_vm_metrics,
     get_monitor_health,
-    get_metrics_history
+    get_metrics_history,
+    get_allocation_controller_status,
+    get_allocation_recommendations,
+    get_allocation_history,
+    set_automation_mode,
+    set_emergency_stop_status,
+    apply_manual_cpu_allocation,
+    apply_manual_ram_allocation,
+    apply_pending_recommendation
 )
 
 xen_bp = Blueprint("xen", __name__, url_prefix="/api/xen")
+
+def admin_required(f):
+    """Enforce administrator role authentication for critical actuation operations."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"success": False, "error": "Authorization header missing or invalid"}), 401
+        token = auth_header.replace("Bearer ", "").strip()
+        payload = verify_session_token(token)
+        if not payload:
+            return jsonify({"success": False, "error": "Invalid or expired session token"}), 401
+        if payload.get("role") != "admin":
+            return jsonify({"success": False, "error": "Administrator privilege required"}), 403
+        request.user = payload
+        return f(*args, **kwargs)
+    return decorated_function
 
 @xen_bp.route("/status", methods=["GET"])
 def xen_status():
     """
     GET /api/xen/status
-    Returns XCP-ng virtualization metadata, VM roles, and Phase 2 Dynamic Resource Allocation specifications.
+    Returns XCP-ng virtualization metadata, VM roles, and Phase 3 specifications.
     """
     try:
         data = get_xen_cluster_metadata()
@@ -144,10 +171,203 @@ def xen_history():
             "data": history_data or []
         }), 200
     except Exception as e:
-        # Avoid exposing credentials or internal stack traces
         return jsonify({
             "success": True,
             "count": 0,
             "data": [],
             "warning": "Historical telemetry data temporarily unavailable."
         }), 200
+
+# -------------------------------------------------------------
+# Phase 3: Dynamic Resource Allocation Endpoints
+# -------------------------------------------------------------
+@xen_bp.route("/allocation/status", methods=["GET"])
+def xen_allocation_status():
+    """
+    GET /api/xen/allocation/status
+    Returns allocation controller mode, emergency stop status, limits, and recommendations.
+    """
+    try:
+        data = get_allocation_controller_status()
+        return jsonify({
+            "success": True,
+            "data": data
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/recommendations", methods=["GET"])
+def xen_allocation_recommendations():
+    """
+    GET /api/xen/allocation/recommendations
+    Returns real-time scaling recommendations for monitored VMs.
+    """
+    try:
+        data = get_allocation_recommendations()
+        return jsonify({
+            "success": True,
+            "data": data
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/history", methods=["GET"])
+def xen_allocation_history_route():
+    """
+    GET /api/xen/allocation/history?limit=50&vm_name=...
+    Returns audit trail of executed allocation actions from resource_allocation_history.
+    """
+    try:
+        vm_name = request.args.get("vm_name")
+        limit_arg = request.args.get("limit", 50)
+        try:
+            limit = int(limit_arg)
+        except (ValueError, TypeError):
+            limit = 50
+
+        history = get_allocation_history(vm_name=vm_name, limit=limit)
+        return jsonify({
+            "success": True,
+            "count": len(history),
+            "data": history
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/enable", methods=["POST"])
+@admin_required
+def xen_allocation_enable():
+    """
+    POST /api/xen/allocation/enable
+    Switches controller mode to 'auto' for automated closed-loop scaling.
+    """
+    try:
+        mode = set_automation_mode("auto")
+        return jsonify({
+            "success": True,
+            "message": "Automated dynamic resource allocation enabled.",
+            "mode": mode
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/disable", methods=["POST"])
+@admin_required
+def xen_allocation_disable():
+    """
+    POST /api/xen/allocation/disable
+    Switches controller mode to 'manual' (recommendations only, no automated scaling).
+    """
+    try:
+        mode = set_automation_mode("manual")
+        return jsonify({
+            "success": True,
+            "message": "Automated dynamic resource allocation disabled. Manual mode active.",
+            "mode": mode
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/emergency-stop", methods=["POST"])
+@admin_required
+def xen_allocation_emergency_stop():
+    """
+    POST /api/xen/allocation/emergency-stop
+    Immediately engages or disengages emergency stop.
+    Request JSON: { "action": "engage" } or { "action": "resume" }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        action = body.get("action", "engage").lower().strip()
+        enabled = False if action in ("resume", "disengage", "false", "off") else True
+        new_state = set_emergency_stop_status(enabled)
+        return jsonify({
+            "success": True,
+            "emergency_stop": new_state,
+            "message": "Emergency stop ENGAGED. Automated scaling blocked." if new_state else "Emergency stop DISENGAGED. Normal operations resumed."
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/cpu", methods=["POST"])
+@admin_required
+def xen_allocation_cpu():
+    """
+    POST /api/xen/allocation/cpu
+    Admin manual CPU allocation request.
+    Request JSON: { "vm_name": "Alpine-Linux", "vcpus": 2, "reason": "..." }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name")
+        vcpus = data.get("vcpus")
+        reason = data.get("reason", "Administrator manual adjustment")
+
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+        if vcpus is None:
+            return jsonify({"success": False, "error": "Field 'vcpus' is required."}), 400
+
+        try:
+            vcpus = int(vcpus)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "error": "Field 'vcpus' must be an integer."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        result = apply_manual_cpu_allocation(vm_name, vcpus, reason=reason, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/ram", methods=["POST"])
+@admin_required
+def xen_allocation_ram():
+    """
+    POST /api/xen/allocation/ram
+    Admin manual dynamic RAM allocation (ballooning) request.
+    Request JSON: { "vm_name": "Alpine-Linux", "ram_mb": 2048, "reason": "..." }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name")
+        ram_mb = data.get("ram_mb")
+        reason = data.get("reason", "Administrator manual adjustment")
+
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+        if ram_mb is None:
+            return jsonify({"success": False, "error": "Field 'ram_mb' is required."}), 400
+
+        try:
+            ram_mb = float(ram_mb)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "error": "Field 'ram_mb' must be a numeric value."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        result = apply_manual_ram_allocation(vm_name, ram_mb, reason=reason, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/apply-recommended", methods=["POST"])
+@admin_required
+def xen_allocation_apply_recommended():
+    """
+    POST /api/xen/allocation/apply-recommended
+    Apply pending recommendation for a specific VM.
+    Request JSON: { "vm_name": "Alpine-Linux" }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        result = apply_pending_recommendation(vm_name, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500

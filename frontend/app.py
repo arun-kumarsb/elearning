@@ -18,6 +18,7 @@ from frontend.pages.enrollments import render_enrollments_page
 from frontend.pages.admin import render_admin_page
 from frontend.pages.xen_architecture import render_xen_architecture_page
 from frontend.pages.xen_monitoring import render_xen_monitoring_page
+from frontend.pages.dynamic_allocation import render_dynamic_allocation_page
 
 # Page Configuration
 st.set_page_config(
@@ -124,6 +125,8 @@ def main():
         render_admin_page()
     elif selected_page == "📈 Xen Resource Monitoring":
         render_xen_monitoring_page()
+    elif selected_page == "⚡ Dynamic Resource Allocation":
+        render_dynamic_allocation_page()
     elif selected_page == "🔬 Xen Virtualization Architecture":
         render_xen_architecture_page()
     else:

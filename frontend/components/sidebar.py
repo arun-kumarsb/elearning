@@ -36,6 +36,7 @@ def render_sidebar():
             nav_options = [
                 "📊 Dashboard",
                 "📈 Xen Resource Monitoring",
+                "⚡ Dynamic Resource Allocation",
                 "👥 Student Management",
                 "📚 Course Management",
                 "📝 Enrollment Overview",

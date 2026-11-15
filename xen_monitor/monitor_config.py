@@ -27,21 +27,27 @@ class MonitorConfig:
 
         # Polling & Scheduling
         self.poll_interval_sec = int(os.getenv("MONITOR_INTERVAL", "5"))
+        self.allocation_mode = os.getenv("ALLOCATION_MODE", "manual")  # 'manual' (default) or 'auto'
 
-        # Elasticity Thresholds (Phase 3 Prep)
-        self.cpu_scale_up_threshold = float(os.getenv("CPU_SCALE_UP_THRESHOLD", "75.0"))
+        # CPU Elasticity Thresholds (Phase 3)
+        self.cpu_scale_up_threshold = float(os.getenv("CPU_SCALE_UP_THRESHOLD", "80.0"))
         self.cpu_scale_down_threshold = float(os.getenv("CPU_SCALE_DOWN_THRESHOLD", "25.0"))
-        self.ram_scale_up_threshold = float(os.getenv("RAM_SCALE_UP_THRESHOLD", "80.0"))
-
-        # Boundaries & Cooldown (Phase 3 Prep)
-        self.cooldown_period_sec = int(os.getenv("SCALE_COOLDOWN_SEC", "60"))
         self.min_vcpus = int(os.getenv("MIN_VCPUS", "1"))
-        self.max_vcpus = int(os.getenv("MAX_VCPUS", "8"))
-        self.min_ram_mb = int(os.getenv("MIN_RAM_MB", "1024"))
-        self.max_ram_mb = int(os.getenv("MAX_RAM_MB", "8192"))
+        self.max_vcpus = int(os.getenv("MAX_VCPUS", "4"))
 
-        # Operational Mode: strictly read_only for Phase 2
-        self.monitor_mode = os.getenv("MONITOR_MODE", "read_only")
+        # RAM Ballooning Thresholds (Phase 3)
+        self.ram_scale_up_threshold = float(os.getenv("RAM_SCALE_UP_THRESHOLD", "85.0"))
+        self.ram_scale_down_threshold = float(os.getenv("RAM_SCALE_DOWN_THRESHOLD", "30.0"))
+        self.ram_increment_mb = float(os.getenv("RAM_INCREMENT_MB", "512.0"))
+        self.min_ram_mb = float(os.getenv("RAM_MIN_MB", os.getenv("MIN_RAM_MB", "1024.0")))
+        self.max_ram_mb = float(os.getenv("RAM_MAX_MB", os.getenv("MAX_RAM_MB", "4096.0")))
+
+        # Boundaries & Cooldown Hysteresis
+        self.cooldown_period_sec = int(os.getenv("COOLDOWN_PERIOD", os.getenv("SCALE_COOLDOWN_SEC", "60")))
+        self.consecutive_breach_threshold = int(os.getenv("CONSECUTIVE_BREACH_THRESHOLD", "2"))
+
+        # Operational Mode
+        self.monitor_mode = os.getenv("MONITOR_MODE", "active")
 
     def to_dict(self):
         return {
@@ -53,13 +59,17 @@ class MonitorConfig:
             "app_vm_ip": self.app_vm_ip,
             "db_vm_ip": self.db_vm_ip,
             "poll_interval_sec": self.poll_interval_sec,
+            "allocation_mode": self.allocation_mode,
             "cpu_scale_up_threshold": self.cpu_scale_up_threshold,
             "cpu_scale_down_threshold": self.cpu_scale_down_threshold,
-            "ram_scale_up_threshold": self.ram_scale_up_threshold,
-            "cooldown_period_sec": self.cooldown_period_sec,
             "min_vcpus": self.min_vcpus,
             "max_vcpus": self.max_vcpus,
+            "ram_scale_up_threshold": self.ram_scale_up_threshold,
+            "ram_scale_down_threshold": self.ram_scale_down_threshold,
+            "ram_increment_mb": self.ram_increment_mb,
             "min_ram_mb": self.min_ram_mb,
             "max_ram_mb": self.max_ram_mb,
+            "cooldown_period_sec": self.cooldown_period_sec,
+            "consecutive_breach_threshold": self.consecutive_breach_threshold,
             "monitor_mode": self.monitor_mode
         }

@@ -123,6 +123,22 @@ def init_sqlite_schema(conn):
             rationale TEXT,
             cooldown_active INTEGER DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS resource_allocation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vm_name TEXT NOT NULL,
+            vm_uuid TEXT,
+            resource_type TEXT NOT NULL,
+            previous_value REAL NOT NULL,
+            requested_value REAL NOT NULL,
+            actual_value REAL NOT NULL,
+            trigger_reason TEXT NOT NULL,
+            action_type TEXT NOT NULL DEFAULT 'MANUAL',
+            execution_status TEXT NOT NULL DEFAULT 'SUCCESS',
+            error_message TEXT,
+            initiated_by TEXT NOT NULL DEFAULT 'system',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
 
@@ -252,7 +268,7 @@ def ensure_schema():
         if is_mariadb_reachable():
             res = test_connection()
             tables = res.get("tables", [])
-            required_tables = ["users", "enrollments", "vm_metrics_history", "allocation_decisions_history"]
+            required_tables = ["users", "enrollments", "vm_metrics_history", "allocation_decisions_history", "resource_allocation_history"]
             missing_tables = [t for t in required_tables if t not in tables]
             
             if missing_tables:

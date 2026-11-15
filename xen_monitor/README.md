@@ -81,15 +81,32 @@ Phase 2 implements a robust, genuine monitoring engine that collects physical hy
 
 ---
 
-## 4. Phase 3 Elasticity Recommendation Rules (READ-ONLY)
+## 4. Phase 3: Dynamic CPU and RAM Allocation Architecture
 
-The `allocation_engine.py` module evaluates telemetry against defined thresholds:
+Phase 3 implements real, closed-loop actuation and administrator controls over XCP-ng XenAPI:
 
-- **CPU Scale-Up:** If VM CPU utilization > `CPU_SCALE_UP_THRESHOLD` (default 75%), recommends incrementing vCPUs by +1 (up to max bound 8 vCPUs).
-- **CPU Scale-Down:** If VM CPU utilization < `CPU_SCALE_DOWN_THRESHOLD` (default 25%), recommends decrementing vCPUs by -1 (down to min bound 1 vCPU).
-- **RAM Scale-Up:** If VM memory utilization > `RAM_SCALE_UP_THRESHOLD` (default 80%), recommends ballooning RAM by +512 MB (up to max bound 8192 MB).
-- **Cooldown Hysteresis:** An active scaling recommendation initiates a 60-second cooldown period per VM to prevent rapid flapping or oscillating resource changes.
-- **Safety Guarantee:** Phase 2 recommendations are strictly advisory and recorded in `allocation_decisions_history`. No automatic hypervisor resizing or reboots occur without explicit authorization.
+### 1. Actuation Methods (`xen_api_client.py`):
+- **Live vCPU Scaling:** Actuates live CPU hotplugging via `VM.set_VCPUs_number_live(session, vm_ref, vcpus)` on running VMs, and updates `VM.set_VCPUs_at_startup` for reboot persistence.
+- **Dynamic Memory Ballooning:** Updates dynamic memory boundaries via `VM.set_memory_dynamic_range(session, vm_ref, dynamic_min, dynamic_max)` and live balloon targets via `VM.set_memory_target_live`.
+- **Limits & Invariants Enforcement:** Strictly enforces `static_min <= dynamic_min <= dynamic_max <= static_max`. Prevents scaling beyond physical host RAM limits (with a 256 MB safety cushion).
+- **Post-Change Verification:** Re-queries `VM.get_record` from XenAPI to confirm that the hypervisor successfully updated the configuration.
+
+### 2. Intelligent Scaling Policy (`allocation_engine.py`):
+- **CPU Policy:**
+  - `cpu_percent > 80.0%`: Scale up (+1 vCPU up to `max_vcpus=4`).
+  - `cpu_percent < 25.0%`: Scale down (-1 vCPU down to `min_vcpus=1`).
+  - `25.0% - 80.0%`: Hold nominal state.
+- **RAM Policy:**
+  - `ram_percent > 85.0%`: Scale up (+512 MB up to `max_ram_mb=4096`).
+  - `ram_percent < 30.0%`: Scale down (-512 MB down to `min_ram_mb=1024`).
+  - `30.0% - 85.0%`: Hold nominal state.
+- **Hysteresis & Consecutive Breach Tracking:** Requires 2 consecutive breaches before recommending or applying an action to prevent flapping on workload bursts.
+- **Independent Cooldowns:** Independent per-resource tracking `(vm_name, 'cpu')` and `(vm_name, 'ram')` ensures that CPU cooldowns never block urgent memory evaluations.
+
+### 3. Safety Interlocks & Emergency Stop:
+- `ALLOCATION_MODE=manual` (default) ensures scaling requires administrator confirmation. Switching to `auto` enables autonomous closed-loop execution.
+- **Emergency Stop Toggle:** Immediately pauses automated scaling operations without halting or restarting virtual machines.
+- **Safety Invariant:** Never automatically reboots, halts, or migrates VMs.
 
 ---
 
@@ -110,12 +127,24 @@ APP_VM_IP=10.189.191.51
 DB_VM_NAME=Alpine-DB
 DB_VM_IP=10.189.191.248
 
-# Monitoring & Elasticity Engine
+# Monitoring & Elasticity Engine (Phase 3 Parameters)
 MONITOR_INTERVAL=5
-MONITOR_MODE=read_only
-CPU_SCALE_UP_THRESHOLD=75.0
+ALLOCATION_MODE=manual
+COOLDOWN_PERIOD=60
+CONSECUTIVE_BREACH_THRESHOLD=2
+
+# CPU Allocation Limits & Thresholds
+CPU_SCALE_UP_THRESHOLD=80.0
 CPU_SCALE_DOWN_THRESHOLD=25.0
-RAM_SCALE_UP_THRESHOLD=80.0
+MIN_VCPUS=1
+MAX_VCPUS=4
+
+# RAM Dynamic Allocation Limits & Thresholds
+RAM_SCALE_UP_THRESHOLD=85.0
+RAM_SCALE_DOWN_THRESHOLD=30.0
+RAM_INCREMENT_MB=512.0
+RAM_MIN_MB=1024.0
+RAM_MAX_MB=4096.0
 ```
 
 ---

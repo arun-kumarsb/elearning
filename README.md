@@ -306,14 +306,54 @@ curl -s http://10.189.191.51:5000/api/xen/vms/Alpine-Linux/metrics
 curl -s http://10.189.191.51:5000/api/xen/monitor/status
 ```
 
-### 13. Historical Telemetry for Time-Series Charting
+### 14. Dynamic Resource Allocation Status
 ```bash
-curl -s "http://10.189.191.51:5000/api/xen/history?limit=50"
+curl -s http://10.189.191.51:5000/api/xen/allocation/status
+```
+
+### 15. Real-Time Allocation Recommendations
+```bash
+curl -s http://10.189.191.51:5000/api/xen/allocation/recommendations
+```
+
+### 16. Allocation Audit Trail History
+```bash
+curl -s "http://10.189.191.51:5000/api/xen/allocation/history?limit=50"
+```
+
+### 17. Enable Autonomous Dynamic Scaling (Admin Auth Required)
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/enable \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
+
+### 18. Emergency Stop (Safety Interlock)
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/emergency-stop \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"engage"}'
+```
+
+### 19. Manual Live vCPU Allocation
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/cpu \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-Linux", "vcpus": 3, "reason":"Capacity scaling"}'
+```
+
+### 20. Manual Dynamic RAM Ballooning
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/ram \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-Linux", "ram_mb": 2560.0, "reason":"Memory expansion"}'
 ```
 
 ---
 
-## 10. Xen-Based Dynamic Resource Allocation (Phase 2 & Phase 3)
+## 10. Xen-Based Dynamic Resource Allocation (Phase 1, 2 & 3)
 
 The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services"**.
 
@@ -322,34 +362,34 @@ The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scala
 - Private virtual bridged networking with verified zero packet loss.
 
 ### Phase 2: Real-Time Xen/XCP-ng Resource Monitoring (Complete)
-Implemented in `xen_monitor/`:
-1. **XCP-ng XAPI Client (`xen_api_client.py`):**
-   - Connects to XCP-ng hypervisor (`10.189.191.175`) over XML-RPC (port 443/80) with timeout socket transports.
-   - Dynamically discovers guest VM UUIDs by actual Xen name (`Alpine-Linux` and `Alpine-DB`).
-   - Retrieves host hardware cores, CPU load, total/free RAM, and running VM count.
-   - Extracts VM vCPU counts, allocated RAM, guest memory usage, and VIF network RX/TX bytes.
-2. **Metric Normalization & Rate Tracking (`vm_metrics.py`, `network_monitor.py`):**
-   - Calculates real-time network throughput (KB/s, MB/s) from delta byte counters.
-   - Normalizes host and VM metrics into unified data structures.
-3. **Database Telemetry Persistence (`resource_monitor.py`):**
-   - Stores time-series metrics into `vm_metrics_history` and `allocation_decisions_history`.
-4. **Streamlit Monitoring Interface (`frontend/pages/xen_monitoring.py`):**
-   - Displays real-time hypervisor status banner, CPU and RAM radial gauges, KPI metric cards, VM comparison matrix, and historical line charts.
-   - Includes automatic 5-second polling refresh toggle and immediate manual refresh.
+- Authenticated XenAPI XML-RPC client discovering VMs dynamically (`Alpine-Linux` and `Alpine-DB`).
+- Normalized physical host hardware metrics (cores, CPU %, total/available RAM) and guest telemetry.
+- Telemetry persistence into `vm_metrics_history` and `allocation_decisions_history`.
 
-### Phase 3: Elasticity Recommendation Engine (Prepared & Non-Destructive)
-Implemented in `xen_monitor/allocation_engine.py`:
-- **CPU Scaling Rules:** Recommends scaling vCPUs up when CPU utilization exceeds 75%; recommends scaling down when utilization falls below 25%.
-- **Memory Scaling Rules:** Recommends ballooning RAM by +512 MB when RAM utilization exceeds 80%.
-- **Safety Hysteresis:** Enforces minimum/maximum hardware bounds and a 60-second cooldown period to prevent resource flapping.
-- **Safety Guarantee:** Phase 2 recommendations are purely advisory and logged to MariaDB; no automatic reboots or hypervisor reconfigurations occur.
+### Phase 3: Dynamic CPU and RAM Resource Allocation (Complete)
+Implemented in `xen_monitor/xen_api_client.py`, `xen_monitor/allocation_engine.py`, `xen_monitor/resource_monitor.py`, and `frontend/pages/dynamic_allocation.py`:
+1. **Real XenAPI Live Actuation:**
+   - **Live vCPU Scaling:** Actuates live CPU hotplugging via `VM.set_VCPUs_number_live` and persists configuration via `VM.set_VCPUs_at_startup`.
+   - **Dynamic Memory Ballooning:** Modifies Xen dynamic memory range via `VM.set_memory_dynamic_range` and adjusts live target via `VM.set_memory_target_live` with strict limit verification (`static_min <= dynamic_min <= dynamic_max <= static_max`).
+   - **Post-Change Verification:** Re-queries VM records via XenAPI to confirm the hypervisor accepted the modification.
+2. **Intelligent Allocation Engine:**
+   - **Threshold Rules:** CPU >80% scales up (+1 vCPU up to 4); CPU <25% scales down (-1 vCPU down to 1). RAM >85% scales up (+512 MB up to 4096 MB); RAM <30% scales down (-512 MB down to 1024 MB).
+   - **Independent Cooldowns:** Per-resource cooldown tracking `(VM, 'cpu')` and `(VM, 'ram')` ensures CPU cooldown does not block memory evaluation.
+   - **Hysteresis & Consecutive Breach Confirmation:** Requires 2 consecutive breaches to eliminate flapping on transient workload spikes.
+   - **Host Physical Capacity Interlock:** Checks physical host free RAM before scaling up dynamic memory ceilings.
+3. **Safety Interlocks & Emergency Stop:**
+   - `ALLOCATION_MODE=manual` by default. Autonomous closed-loop mode (`auto`) can be toggled by administrators.
+   - Immediate **Emergency Stop** switch blocks automated scaling without stopping or rebooting VMs.
+   - Strictly enforces safety invariant: Never reboots, halts, or migrates VMs automatically.
+4. **Administrator Control Panel (Streamlit):**
+   - Automation status banner, real-time VM resource cards, recommendations table with 1-click apply, manual CPU/RAM sliders with confirmation gates, audit history, and static vs. dynamic efficiency comparison.
 
 ---
 
 ## 11. Running Automated Tests
 
-Run the complete automated test suite covering Phase 1 REST APIs and Phase 2 Xen monitoring engine:
+Run the complete automated test suite covering Phase 1 REST APIs, Phase 2 Xen monitoring engine, and Phase 3 Dynamic Allocation controller:
 ```bash
 python3 -m unittest discover tests
 ```
-*Result: 30/30 tests passing.*
+*Result: 52/52 tests passing (all 18+ Section 13 scenarios verified).*

@@ -178,3 +178,43 @@ def api_get_xen_history(vm_name: Optional[str] = None, limit: int = 50) -> Dict[
 def api_get_health() -> Dict[str, Any]:
     return safe_request("GET", "health")
 
+# Phase 3: Dynamic Resource Allocation API Methods
+def api_get_allocation_status() -> Dict[str, Any]:
+    return safe_request("GET", "xen/allocation/status")
+
+def api_get_allocation_recommendations() -> Dict[str, Any]:
+    return safe_request("GET", "xen/allocation/recommendations")
+
+def api_get_allocation_history(vm_name: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    endpoint = f"xen/allocation/history?limit={limit}"
+    if vm_name:
+        endpoint += f"&vm_name={vm_name}"
+    return safe_request("GET", endpoint)
+
+def api_enable_allocation() -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/enable")
+
+def api_disable_allocation() -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/disable")
+
+def api_emergency_stop(action: str = "engage") -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/emergency-stop", {"action": action})
+
+def api_apply_manual_cpu(vm_name: str, vcpus: int, reason: str = "Administrator manual adjustment") -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/cpu", {
+        "vm_name": vm_name,
+        "vcpus": vcpus,
+        "reason": reason
+    })
+
+def api_apply_manual_ram(vm_name: str, ram_mb: float, reason: str = "Administrator manual adjustment") -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/ram", {
+        "vm_name": vm_name,
+        "ram_mb": ram_mb,
+        "reason": reason
+    })
+
+def api_apply_recommended(vm_name: str) -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/apply-recommended", {"vm_name": vm_name})
+
+

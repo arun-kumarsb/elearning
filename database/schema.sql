@@ -124,3 +124,26 @@ CREATE TABLE IF NOT EXISTS allocation_decisions_history (
     INDEX idx_decision_vm_time (vm_name, timestamp)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ----------------------------------------------------------------------------
+-- Phase 3: Table: resource_allocation_history
+-- Purpose: Audit log of CPU and RAM dynamic allocation actuation events
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS resource_allocation_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    vm_name VARCHAR(100) NOT NULL,
+    vm_uuid VARCHAR(64) NULL,
+    resource_type VARCHAR(20) NOT NULL,
+    previous_value FLOAT NOT NULL,
+    requested_value FLOAT NOT NULL,
+    actual_value FLOAT NOT NULL,
+    trigger_reason TEXT NOT NULL,
+    action_type VARCHAR(20) NOT NULL DEFAULT 'MANUAL',
+    execution_status VARCHAR(20) NOT NULL DEFAULT 'SUCCESS',
+    error_message TEXT NULL,
+    initiated_by VARCHAR(100) NOT NULL DEFAULT 'system',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_alloc_vm_time (vm_name, created_at),
+    INDEX idx_alloc_status (execution_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
