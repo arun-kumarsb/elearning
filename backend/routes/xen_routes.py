@@ -22,6 +22,7 @@ from backend.services.xen_service import (
     apply_pending_recommendation,
     transition_vm_to_baseline,
     execute_baseline_maintenance_service,
+    configure_startup_vcpus_service,
     get_workload_simulator_status,
     start_cpu_workload_service,
     start_ram_workload_service,
@@ -526,6 +527,25 @@ def xen_vm_baseline_maintenance():
         initiated_by = request.user.get("email", "admin")
         result = execute_baseline_maintenance_service(vm_name, initiated_by=initiated_by)
         status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/vm/configure-startup-vcpus", methods=["POST"])
+@admin_required
+def xen_configure_startup_vcpus():
+    """
+    POST /api/xen/vm/configure-startup-vcpus
+    Configures VM startup vCPUs (VCPUs_at_startup).
+    Request JSON: { "vm_name": "Alpine-Linux", "startup_vcpus": 1 }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name", "Alpine-Linux")
+        target_vcpus = int(data.get("startup_vcpus", 1))
+        initiated_by = request.user.get("email", "admin")
+        result = configure_startup_vcpus_service(vm_name, target_startup_vcpus=target_vcpus, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") or result.get("status") == "MAINTENANCE_REQUIRED" else 400
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500

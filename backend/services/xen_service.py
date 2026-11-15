@@ -212,6 +212,11 @@ def execute_baseline_maintenance_service(vm_name: str, initiated_by: str = "admi
     monitor = get_monitor_instance()
     return monitor.execute_baseline_maintenance(vm_name, initiated_by=initiated_by)
 
+def configure_startup_vcpus_service(vm_name: str, target_startup_vcpus: int = 1, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Configure VM startup vCPU count (VCPUs_at_startup)."""
+    monitor = get_monitor_instance()
+    return monitor.configure_startup_vcpus(vm_name, target_startup_vcpus=target_startup_vcpus, initiated_by=initiated_by)
+
 # -------------------------------------------------------------
 # Workload Simulator Service Functions
 # -------------------------------------------------------------

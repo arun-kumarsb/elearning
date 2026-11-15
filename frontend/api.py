@@ -265,6 +265,13 @@ api_apply_recommended = api_apply_recommendation  # Alias for backward compatibi
 def api_transition_to_baseline(vm_name: str) -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/transition-baseline", {"vm_name": vm_name})
 
+def api_configure_startup_vcpus(vm_name: str, startup_vcpus: int = 1) -> Dict[str, Any]:
+    """Configure VM startup vCPUs (VCPUs_at_startup)."""
+    return safe_request("POST", "xen/vm/configure-startup-vcpus", {
+        "vm_name": vm_name,
+        "startup_vcpus": startup_vcpus
+    })
+
 # -------------------------------------------------------------
 # Workload Simulator API Endpoints
 # -------------------------------------------------------------

@@ -747,6 +747,32 @@ class XenResourceMonitor:
             "actions": actions_performed
         }
 
+    def configure_startup_vcpus(self, vm_identifier: str, target_startup_vcpus: int = 1, initiated_by: str = "admin") -> Dict[str, Any]:
+        """Configure VM startup vCPU count (VCPUs_at_startup) using XenAPI with audit logging."""
+        with self._allocation_lock:
+            res = self.client.configure_startup_vcpus(vm_identifier, target_startup_vcpus=target_startup_vcpus)
+            vm_name = res.get("vm_name") or vm_identifier
+            vm_uuid = res.get("vm_uuid")
+            res_status = res.get("status", "SUCCESS" if res.get("success") else "FAILED")
+            status = "maintenance_required" if res_status == "MAINTENANCE_REQUIRED" else ("success" if res.get("success") else "failed")
+
+            self._persist_allocation_action({
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "resource_type": "cpu",
+                "previous_value": res.get("previous_value"),
+                "requested_value": target_startup_vcpus,
+                "actual_value": res.get("actual_value"),
+                "trigger_reason": f"Administrator configured startup vCPUs to {target_startup_vcpus}",
+                "action_type": "configure_startup_vcpus",
+                "execution_status": status,
+                "error_message": res.get("error"),
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if status == "success" else ("maintenance_required" if status == "maintenance_required" else "failed")
+            })
+            return res
+
     # -----------------------------------------------------------------
     # PERSISTENCE METHODS
     # -----------------------------------------------------------------

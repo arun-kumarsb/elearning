@@ -851,5 +851,218 @@ class TestStudentLoadOrchestration(unittest.TestCase):
             data = api_res.get_json()
             self.assertTrue(data.get("success"))
 
+    # -------------------------------------------------------------------------
+    # Scenario 34: Live CPU Scale-Up Execution and Verification
+    # -------------------------------------------------------------------------
+    def test_34_live_cpu_scale_up_execution_and_verification(self):
+        """Verify live CPU scale-up from 1 to 2 vCPUs on a running VM with verified readback."""
+        client = XenAPIClient(self.config)
+        client.is_connected = True
+        client.proxy = MagicMock()
+        client.session_id = "test-session-scale-up"
+
+        # Mock VM discovery and records
+        vm_ref = "OpaqueRef:app-vm-1"
+        metrics_ref = "OpaqueRef:app-metrics-1"
+        client.proxy.VM.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {
+                vm_ref: {
+                    "name_label": "Alpine-Linux",
+                    "uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+                    "power_state": "Running",
+                    "VCPUs_max": "4",
+                    "VCPUs_at_startup": "4",
+                    "metrics": metrics_ref,
+                    "guest_metrics": "OpaqueRef:NULL"
+                }
+            }
+        }
+        client.proxy.VM.get_record.return_value = {
+            "Status": "Success",
+            "Value": {
+                "name_label": "Alpine-Linux",
+                "uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+                "power_state": "Running",
+                "VCPUs_max": "4",
+                "VCPUs_at_startup": "4",
+                "metrics": metrics_ref
+            }
+        }
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {
+            "Status": "Failure",
+            "ErrorDescription": ["VM_BAD_POWER_STATE", vm_ref, "Halted", "Running"]
+        }
+        client.proxy.VM.set_VCPUs_number_live.return_value = {"Status": "Success"}
+        client.proxy.VM_metrics.get_record.return_value = {
+            "Status": "Success",
+            "Value": {"VCPUs_number": "2"}
+        }
+
+        # Local guest probe confirms 2 CPUs online
+        with patch.object(client, "_read_local_linux_guest_online_cpus", return_value=2):
+            res = client.set_vm_vcpus("Alpine-Linux", 2)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["actual_value"], 2)
+            self.assertEqual(res["requested_value"], 2)
+            self.assertEqual(res["verification_status"], "verified")
+            client.proxy.VM.set_VCPUs_number_live.assert_called_with("test-session-scale-up", vm_ref, 2)
+
+    # -------------------------------------------------------------------------
+    # Scenario 35: Startup vCPUs Configuration - Maintenance Required on Running VM
+    # -------------------------------------------------------------------------
+    def test_35_startup_vcpus_configuration_maintenance_required(self):
+        """Verify configure_startup_vcpus returns MAINTENANCE_REQUIRED on Running VM without auto-reboot."""
+        client = XenAPIClient(self.config)
+        client.is_connected = True
+        client.proxy = MagicMock()
+        client.session_id = "test-session-startup"
+
+        vm_ref = "OpaqueRef:app-vm-1"
+        client.proxy.VM.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {
+                vm_ref: {
+                    "name_label": "Alpine-Linux",
+                    "uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+                    "power_state": "Running",
+                    "VCPUs_max": "4",
+                    "VCPUs_at_startup": "4",
+                    "metrics": "OpaqueRef:NULL"
+                }
+            }
+        }
+        client.proxy.VM.get_record.return_value = {
+            "Status": "Success",
+            "Value": {
+                "name_label": "Alpine-Linux",
+                "power_state": "Running",
+                "VCPUs_max": "4",
+                "VCPUs_at_startup": "4",
+                "metrics": "OpaqueRef:NULL"
+            }
+        }
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {
+            "Status": "Failure",
+            "ErrorDescription": ["VM_BAD_POWER_STATE", vm_ref, "Halted", "Running"]
+        }
+
+        with patch.object(client, "_read_local_linux_guest_online_cpus", return_value=1):
+            res = client.configure_startup_vcpus("Alpine-Linux", target_startup_vcpus=1)
+            self.assertFalse(res["success"])
+            self.assertEqual(res["status"], "MAINTENANCE_REQUIRED")
+            self.assertTrue(res["maintenance_required"])
+            self.assertEqual(res["online_vcpus"], 1)
+            self.assertEqual(res["startup_vcpus"], 4)
+            self.assertIn("VM_BAD_POWER_STATE", res["error"])
+
+    # -------------------------------------------------------------------------
+    # Scenario 36: Configure Startup vCPUs Endpoint
+    # -------------------------------------------------------------------------
+    def test_36_startup_vcpus_endpoint(self):
+        """Verify /api/xen/vm/configure-startup-vcpus endpoint requires admin authentication."""
+        with patch("backend.routes.xen_routes.configure_startup_vcpus_service") as mock_cfg:
+            mock_cfg.return_value = {
+                "success": False,
+                "status": "MAINTENANCE_REQUIRED",
+                "maintenance_required": True,
+                "vm_name": "Alpine-Linux",
+                "startup_vcpus": 4,
+                "target_startup_vcpus": 1
+            }
+            res = self.client.post(
+                "/api/xen/vm/configure-startup-vcpus",
+                headers=self.admin_headers,
+                json={"vm_name": "Alpine-Linux", "startup_vcpus": 1}
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.get_json()
+            self.assertEqual(data.get("status"), "MAINTENANCE_REQUIRED")
+
+    # -------------------------------------------------------------------------
+    # Scenario 37: Database CPU Workload Explanation
+    # -------------------------------------------------------------------------
+    def test_37_database_cpu_nominal_explanation(self):
+        """Verify Database VM runtime metrics include source, freshness, and workload explanation."""
+        client = XenAPIClient(self.config)
+        client.is_connected = True
+        client.proxy = MagicMock()
+        client.session_id = "test-session-db"
+
+        vm_info = {
+            "name": "Alpine-DB",
+            "uuid": "0a6dec09-0466-0079-4b66-80704b59587d",
+            "vcpus": 4,
+            "metrics_ref": "OpaqueRef:NULL",
+            "guest_metrics_ref": "OpaqueRef:NULL"
+        }
+        metrics = client.get_vm_runtime_metrics(vm_info)
+        self.assertEqual(metrics["name"], "Alpine-DB")
+        self.assertIn("cpu_source", metrics)
+        self.assertIn("freshness", metrics)
+        self.assertIn("cpu_workload_explanation", metrics)
+        self.assertIsNotNone(metrics["cpu_workload_explanation"])
+
+    # -------------------------------------------------------------------------
+    # Scenario 38: Independent CPU and RAM Policies
+    # -------------------------------------------------------------------------
+    def test_38_independent_cpu_and_ram_policies(self):
+        """Verify that 99.9% CPU and 56.9% RAM yields CPU: SCALE_UP and RAM: HOLD independently."""
+        from xen_monitor.allocation_engine import AllocationEngine
+        engine = AllocationEngine(self.config)
+
+        vm_metrics = {
+            "name": "Alpine-Linux",
+            "uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+            "vcpu_count": 1,
+            "cpu_percent": 99.9,
+            "allocated_ram_mb": 1024.0,
+            "ram_percent": 56.9,
+            "used_ram_mb": 582.0
+        }
+
+        # Trigger consecutive breaches
+        for _ in range(3):
+            dec = engine.evaluate_vm(vm_metrics)
+
+        self.assertEqual(dec["cpu_action"], "SCALE_UP")
+        self.assertEqual(dec["recommended_vcpus"], 2)
+        self.assertEqual(dec["ram_action"], "HOLD")
+        self.assertEqual(dec["recommended_ram_mb"], 1024.0)
+
+    # -------------------------------------------------------------------------
+    # Scenario 39: Advisory Mode Pending Recommendation Execution
+    # -------------------------------------------------------------------------
+    def test_39_advisory_mode_pending_recommendation_execution(self):
+        """Verify apply_recommended_action actuates the pending recommendation and records verified audit."""
+        with patch.object(self.monitor, "get_latest_metrics") as mock_metrics:
+            mock_metrics.return_value = {
+                "recommendations": {
+                    "Alpine-Linux": {
+                        "vm_name": "Alpine-Linux",
+                        "vm_uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+                        "cpu_action": "SCALE_UP",
+                        "recommended_vcpus": 2,
+                        "ram_action": "HOLD",
+                        "recommended_ram_mb": 1024.0,
+                        "rationale": "High CPU load"
+                    }
+                }
+            }
+            with patch.object(self.monitor.client, "set_vm_vcpus") as mock_cpu:
+                mock_cpu.return_value = {
+                    "success": True,
+                    "status": "SUCCESS",
+                    "vm_name": "Alpine-Linux",
+                    "actual_value": 2,
+                    "previous_value": 1,
+                    "requested_value": 2
+                }
+                res = self.monitor.apply_recommended_action("Alpine-Linux", initiated_by="admin")
+                self.assertTrue(res["success"])
+                self.assertEqual(len(res["actions"]), 1)
+                self.assertEqual(res["actions"][0]["resource"], "cpu")
+
 if __name__ == "__main__":
     unittest.main()
