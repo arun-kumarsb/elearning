@@ -191,3 +191,62 @@ def apply_pending_recommendation(vm_name: str, initiated_by: str = "admin") -> D
     monitor = get_monitor_instance()
     return monitor.apply_recommended_action(vm_name, initiated_by=initiated_by)
 
+def transition_vm_to_baseline(vm_name: str, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Safely transitions a VM to the target baseline policy (1 vCPU, 1024 MB RAM)."""
+    monitor = get_monitor_instance()
+    return monitor.transition_to_baseline(vm_name, initiated_by=initiated_by)
+
+# -------------------------------------------------------------
+# Workload Simulator Service Functions
+# -------------------------------------------------------------
+def get_workload_simulator_status() -> Dict[str, Any]:
+    """Retrieve status of active CPU, RAM, and Database synthetic workloads."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().get_status()
+
+def start_cpu_workload_service(target_vm: str = "Alpine-Linux", intensity_percent: float = 75.0,
+                               workers: int = 2, duration_sec: int = 60, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Start artificial CPU workload on target VM."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().start_cpu_workload(
+        target_vm=target_vm,
+        intensity_percent=intensity_percent,
+        workers=workers,
+        duration_sec=duration_sec,
+        initiated_by=initiated_by
+    )
+
+def start_ram_workload_service(target_vm: str = "Alpine-Linux", allocated_mb: float = 256.0,
+                               duration_sec: int = 60, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Start artificial RAM memory consumption on target VM."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().start_ram_workload(
+        target_vm=target_vm,
+        allocated_mb=allocated_mb,
+        duration_sec=duration_sec,
+        initiated_by=initiated_by
+    )
+
+def start_database_workload_service(target_vm: str = "Alpine-DB", intensity: str = "medium",
+                                    workers: int = 2, duration_sec: int = 60, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Start safe transactional workload against MariaDB database."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().start_database_workload(
+        target_vm=target_vm,
+        intensity=intensity,
+        workers=workers,
+        duration_sec=duration_sec,
+        initiated_by=initiated_by
+    )
+
+def stop_workload_service(session_id: str) -> Dict[str, Any]:
+    """Stop an individual workload session."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().stop_workload(session_id)
+
+def stop_all_workloads_service() -> Dict[str, Any]:
+    """Stop all active workload sessions (Emergency Stop)."""
+    from backend.services.workload_service import WorkloadSimulatorService
+    return WorkloadSimulatorService.get_instance().stop_all_workloads()
+
+

@@ -139,6 +139,29 @@ def init_sqlite_schema(conn):
             initiated_by TEXT NOT NULL DEFAULT 'system',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS workload_simulation_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE,
+            target_vm TEXT NOT NULL,
+            workload_type TEXT NOT NULL,
+            intensity_percent REAL,
+            workers INTEGER DEFAULT 1,
+            allocated_mb REAL,
+            duration_sec INTEGER NOT NULL,
+            status TEXT DEFAULT 'running',
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            stopped_at DATETIME,
+            initiated_by TEXT DEFAULT 'admin',
+            details TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS workload_simulation_test (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
 

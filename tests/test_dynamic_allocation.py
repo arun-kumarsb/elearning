@@ -63,8 +63,18 @@ class TestDynamicAllocation(unittest.TestCase):
         self.config.ram_increment_mb = 512.0
         self.config.min_ram_mb = 1024.0
         self.config.max_ram_mb = 4096.0
+        self.config.app_min_ram_mb = 1024.0
+        self.config.app_max_ram_mb = 4096.0
+        self.config.app_initial_ram_mb = 1024.0
+        self.config.app_initial_vcpus = 1
+        self.config.db_min_ram_mb = 1024.0
+        self.config.db_max_ram_mb = 4096.0
+        self.config.db_initial_ram_mb = 1024.0
+        self.config.db_initial_vcpus = 1
         self.config.cooldown_period_sec = 60
-        self.config.consecutive_breach_threshold = 2
+        self.config.scale_up_consecutive_threshold = 3
+        self.config.scale_down_consecutive_threshold = 6
+        self.config.consecutive_breach_threshold = 3
         self.config.allocation_mode = "manual"
 
         self.engine = AllocationEngine(self.config)
@@ -192,9 +202,9 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found["uuid"], "app-vm-uuid-111")
 
-    # 5. CPU Scale-Up Decision (>80%)
+    # 5. CPU Scale-Up Decision (>80% over 3 intervals)
     def test_05_cpu_scale_up_decision(self):
-        """Verify CPU utilization >80% triggers SCALE_UP after consecutive confirmations."""
+        """Verify CPU utilization >80% triggers SCALE_UP after 3 consecutive confirmations."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
@@ -203,18 +213,21 @@ class TestDynamicAllocation(unittest.TestCase):
             "cpu_percent": 90.0,
             "ram_percent": 50.0
         }
-        # Interval 1: First breach awaiting consecutive confirmation
+        # Intervals 1 and 2: Awaiting consecutive confirmations
         dec1 = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec1["cpu_action"], "HOLD")
 
-        # Interval 2: Second consecutive breach triggers scale-up (+1 vCPU)
         dec2 = self.engine.evaluate_vm(vm_metrics)
-        self.assertEqual(dec2["cpu_action"], "SCALE_UP")
-        self.assertEqual(dec2["recommended_vcpus"], 3)
+        self.assertEqual(dec2["cpu_action"], "HOLD")
 
-    # 6. CPU Scale-Down Decision (<25%)
+        # Interval 3: 3rd consecutive breach triggers scale-up (+1 vCPU)
+        dec3 = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec3["cpu_action"], "SCALE_UP")
+        self.assertEqual(dec3["recommended_vcpus"], 3)
+
+    # 6. CPU Scale-Down Decision (<25% over 6 intervals)
     def test_06_cpu_scale_down_decision(self):
-        """Verify CPU utilization <25% triggers SCALE_DOWN after consecutive confirmations."""
+        """Verify CPU utilization <25% triggers SCALE_DOWN after 6 consecutive confirmations."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
@@ -223,18 +236,19 @@ class TestDynamicAllocation(unittest.TestCase):
             "cpu_percent": 15.0,
             "ram_percent": 50.0
         }
-        # Interval 1: First breach
-        dec1 = self.engine.evaluate_vm(vm_metrics)
-        self.assertEqual(dec1["cpu_action"], "HOLD")
+        # Intervals 1-5: First breaches
+        for _ in range(5):
+            dec = self.engine.evaluate_vm(vm_metrics)
+            self.assertEqual(dec["cpu_action"], "HOLD")
 
-        # Interval 2: Sustained low workload triggers scale-down (-1 vCPU)
-        dec2 = self.engine.evaluate_vm(vm_metrics)
-        self.assertEqual(dec2["cpu_action"], "SCALE_DOWN")
-        self.assertEqual(dec2["recommended_vcpus"], 2)
+        # Interval 6: 6th consecutive breach triggers scale-down (-1 vCPU)
+        dec6 = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec6["cpu_action"], "SCALE_DOWN")
+        self.assertEqual(dec6["recommended_vcpus"], 2)
 
-    # 7. RAM Scale-Up Decision (>85%)
+    # 7. RAM Scale-Up Decision (>85% over 3 intervals)
     def test_07_ram_scale_up_decision(self):
-        """Verify RAM utilization >85% triggers SCALE_UP (+512 MB)."""
+        """Verify RAM utilization >85% triggers SCALE_UP (+512 MB) after 3 intervals."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
@@ -249,12 +263,15 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertEqual(dec1["ram_action"], "HOLD")
 
         dec2 = self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
-        self.assertEqual(dec2["ram_action"], "SCALE_UP")
-        self.assertEqual(dec2["recommended_ram_mb"], 2560.0)
+        self.assertEqual(dec2["ram_action"], "HOLD")
 
-    # 8. RAM Scale-Down Decision (<30%)
+        dec3 = self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
+        self.assertEqual(dec3["ram_action"], "SCALE_UP")
+        self.assertEqual(dec3["recommended_ram_mb"], 2560.0)
+
+    # 8. RAM Scale-Down Decision (<30% over 6 intervals)
     def test_08_ram_scale_down_decision(self):
-        """Verify RAM utilization <30% triggers SCALE_DOWN (-512 MB)."""
+        """Verify RAM utilization <30% triggers SCALE_DOWN (-512 MB) after 6 intervals."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
@@ -263,12 +280,13 @@ class TestDynamicAllocation(unittest.TestCase):
             "cpu_percent": 50.0,
             "ram_percent": 20.0
         }
-        dec1 = self.engine.evaluate_vm(vm_metrics)
-        self.assertEqual(dec1["ram_action"], "HOLD")
+        for _ in range(5):
+            dec = self.engine.evaluate_vm(vm_metrics)
+            self.assertEqual(dec["ram_action"], "HOLD")
 
-        dec2 = self.engine.evaluate_vm(vm_metrics)
-        self.assertEqual(dec2["ram_action"], "SCALE_DOWN")
-        self.assertEqual(dec2["recommended_ram_mb"], 2048.0)
+        dec6 = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec6["ram_action"], "SCALE_DOWN")
+        self.assertEqual(dec6["recommended_ram_mb"], 2048.0)
 
     # 9. Cooldown Dampening Behavior
     def test_09_cooldown_behavior(self):
@@ -312,11 +330,15 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertTrue(dec1["cpu_cooldown"]["cooldown_active"])
         self.assertFalse(dec1["ram_cooldown"]["cooldown_active"])
 
-        # Interval 2: RAM triggers SCALE_UP even while CPU is in cooldown
+        # Interval 2
         dec2 = self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
         self.assertEqual(dec2["cpu_action"], "HOLD")
-        self.assertEqual(dec2["ram_action"], "SCALE_UP")
-        self.assertEqual(dec2["recommended_ram_mb"], 2560.0)
+
+        # Interval 3: RAM triggers SCALE_UP even while CPU is in cooldown
+        dec3 = self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
+        self.assertEqual(dec3["cpu_action"], "HOLD")
+        self.assertEqual(dec3["ram_action"], "SCALE_UP")
+        self.assertEqual(dec3["recommended_ram_mb"], 2560.0)
 
     # 11. Hysteresis & Consecutive Threshold Confirmation
     def test_11_hysteresis_consecutive_breaches(self):
@@ -354,7 +376,8 @@ class TestDynamicAllocation(unittest.TestCase):
             "cpu_percent": 95.0,
             "ram_percent": 50.0
         }
-        # Even after consecutive breaches, stays at max 4
+        # Even after 3 consecutive breaches, stays at max 4
+        self.engine.evaluate_vm(vm_metrics)
         self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["cpu_action"], "HOLD")
@@ -372,44 +395,47 @@ class TestDynamicAllocation(unittest.TestCase):
             "cpu_percent": 10.0,
             "ram_percent": 50.0
         }
-        self.engine.evaluate_vm(vm_metrics)
+        for _ in range(5):
+            self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["cpu_action"], "HOLD")
         self.assertEqual(dec["recommended_vcpus"], 1)
         self.assertIn("minimum boundary", dec["rationale"])
 
-    # 14. Maximum RAM Boundary Enforcement (6144 MB for Alpine-Linux)
+    # 14. Maximum RAM Boundary Enforcement (4096 MB)
     def test_14_maximum_ram_enforcement(self):
-        """Verify that at MAX_RAM_MB (6144 MB), scale-up is blocked and held."""
+        """Verify that at MAX_RAM_MB (4096 MB), scale-up is blocked and held."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
             "vcpu_count": 2,
-            "allocated_ram_mb": 6144.0,
+            "allocated_ram_mb": 4096.0,
             "cpu_percent": 50.0,
             "ram_percent": 95.0
         }
         self.engine.evaluate_vm(vm_metrics)
+        self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["ram_action"], "HOLD")
-        self.assertEqual(dec["recommended_ram_mb"], 6144.0)
+        self.assertEqual(dec["recommended_ram_mb"], 4096.0)
         self.assertIn("maximum boundary", dec["rationale"])
 
-    # 15. Minimum RAM Boundary Enforcement (2048 MB for Alpine-Linux)
+    # 15. Minimum RAM Boundary Enforcement (1024 MB)
     def test_15_minimum_ram_enforcement(self):
-        """Verify that at MIN_RAM_MB (2048 MB), scale-down is blocked and held."""
+        """Verify that at MIN_RAM_MB (1024 MB), scale-down is blocked and held."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
             "vcpu_count": 2,
-            "allocated_ram_mb": 2048.0,
+            "allocated_ram_mb": 1024.0,
             "cpu_percent": 50.0,
             "ram_percent": 15.0
         }
-        self.engine.evaluate_vm(vm_metrics)
+        for _ in range(5):
+            self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["ram_action"], "HOLD")
-        self.assertEqual(dec["recommended_ram_mb"], 2048.0)
+        self.assertEqual(dec["recommended_ram_mb"], 1024.0)
         self.assertIn("minimum boundary", dec["rationale"])
 
     # 16. Hypervisor Host Physical Capacity Restrictions
@@ -426,6 +452,7 @@ class TestDynamicAllocation(unittest.TestCase):
         # Needed RAM = 512 + 256 cushion = 768 MB. Host only has 300 MB available.
         host_metrics = {"available_ram_mb": 300.0}
 
+        self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
         self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
         dec = self.engine.evaluate_vm(vm_metrics, host_metrics=host_metrics)
         self.assertEqual(dec["ram_action"], "BLOCKED")
@@ -686,17 +713,17 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertFalse(res["success"])
         self.assertIn("Verification failed", res["error"])
 
-    # 25. Per-VM Policy for Application VM (Alpine-Linux: 2048-6144 MB RAM, 1-4 vCPUs)
+    # 25. Per-VM Policy for Application VM (Alpine-Linux: 1024-4096 MB RAM, 1-4 vCPUs)
     def test_25_per_vm_policy_application_vm(self):
-        """Verify that Application VM policy boundaries (2048-6144 MB RAM, 1-4 vCPUs) are strictly enforced."""
+        """Verify that Application VM policy boundaries (1024-4096 MB RAM, 1-4 vCPUs) are strictly enforced."""
         client = self._create_mock_client()
-        # Out of bounds RAM < 2048 MB
-        res_low_ram = client.set_vm_dynamic_memory("Alpine-Linux", 1024.0)
+        # Out of bounds RAM < 1024 MB
+        res_low_ram = client.set_vm_dynamic_memory("Alpine-Linux", 512.0)
         self.assertFalse(res_low_ram["success"])
         self.assertIn("violates configured limits", res_low_ram["error"])
 
-        # Out of bounds RAM > 6144 MB
-        res_high_ram = client.set_vm_dynamic_memory("Alpine-Linux", 8192.0)
+        # Out of bounds RAM > 4096 MB
+        res_high_ram = client.set_vm_dynamic_memory("Alpine-Linux", 6144.0)
         self.assertFalse(res_high_ram["success"])
         self.assertIn("violates configured limits", res_high_ram["error"])
 
@@ -782,6 +809,198 @@ class TestDynamicAllocation(unittest.TestCase):
         status = monitor.get_allocation_status()
         self.assertIsNotNone(status.get("last_xen_operation"))
         self.assertEqual(status["last_xen_operation"]["status"], "verified")
+
+    # 28. Safe Baseline Transition to 1 vCPU / 1024 MB
+    def test_28_safe_baseline_transition(self):
+        """Verify safe transition of an overprovisioned VM down to 1 vCPU and 1024 MB RAM baseline."""
+        client = self._create_mock_client()
+        monitor = XenResourceMonitor(self.config)
+        monitor.client = client
+
+        client.proxy.VM.get_record.side_effect = [
+            # vCPU pre
+            {"Status": "Success", "Value": {"VCPUs_max": "4", "VCPUs_at_startup": "4", "power_state": "Running"}},
+            # vCPU post verification
+            {"Status": "Success", "Value": {"VCPUs_max": "4", "VCPUs_at_startup": "1", "power_state": "Running"}},
+            # RAM pre
+            {"Status": "Success", "Value": {
+                "memory_static_min": str(512 * 1024 * 1024), "memory_dynamic_min": str(1024 * 1024 * 1024),
+                "memory_dynamic_max": str(4096 * 1024 * 1024), "memory_static_max": str(4096 * 1024 * 1024),
+                "power_state": "Running"
+            }},
+            # RAM post verification
+            {"Status": "Success", "Value": {
+                "memory_static_min": str(512 * 1024 * 1024), "memory_dynamic_min": str(1024 * 1024 * 1024),
+                "memory_dynamic_max": str(1024 * 1024 * 1024), "memory_static_max": str(4096 * 1024 * 1024),
+                "power_state": "Running"
+            }}
+        ]
+        client.proxy.VM.set_VCPUs_number_live.return_value = {"Status": "Success"}
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {"Status": "Success"}
+        client.proxy.VM.set_memory_dynamic_range.return_value = {"Status": "Success"}
+        client.proxy.VM.set_memory_target_live.return_value = {"Status": "Success"}
+        client.proxy.host.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {"ref_host": {"uuid": "h-uuid", "name_label": "XCP-ng", "metrics": "ref_hm"}}
+        }
+        client.proxy.host_metrics.get_record.return_value = {
+            "Status": "Success",
+            "Value": {"memory_total": str(8192 * 1024 * 1024), "memory_free": str(4096 * 1024 * 1024)}
+        }
+        client.proxy.host_cpu.get_all_records.return_value = {"Status": "Success", "Value": {}}
+
+        trans_res = monitor.transition_to_baseline("Alpine-Linux", initiated_by="admin")
+        self.assertTrue(trans_res["success"])
+        self.assertEqual(trans_res["target_baseline"]["vcpus"], 1)
+        self.assertEqual(trans_res["target_baseline"]["ram_mb"], 1024.0)
+
+    # 29. CPU Workload Simulator Start, Status, and Stop
+    def test_29_cpu_workload_simulator(self):
+        """Verify starting, tracking, and stopping authentic synthetic CPU workload."""
+        from backend.services.workload_service import WorkloadSimulatorService
+        svc = WorkloadSimulatorService.get_instance()
+
+        start_res = svc.start_cpu_workload(
+            target_vm="Alpine-Linux",
+            intensity_percent=75.0,
+            workers=1,
+            duration_sec=30,
+            initiated_by="admin"
+        )
+        self.assertTrue(start_res["success"])
+        session_id = start_res["session_id"]
+
+        status = svc.get_status()
+        self.assertIsNotNone(status["running_cpu_session"])
+        self.assertEqual(status["running_cpu_session"]["session_id"], session_id)
+
+        # Stop
+        stop_res = svc.stop_workload(session_id)
+        self.assertTrue(stop_res["success"])
+        status_after = svc.get_status()
+        self.assertIsNone(status_after["running_cpu_session"])
+
+    # 30. RAM Workload Simulator & OOM Headroom Safety Protection
+    def test_30_ram_workload_simulator_oom_protection(self):
+        """Verify that RAM workload generator validates guest memory and prevents OOM."""
+        from backend.services.workload_service import WorkloadSimulatorService
+        svc = WorkloadSimulatorService.get_instance()
+
+        # Attempt to allocate unsafe excessive memory (e.g. 500,000 MB)
+        reject_res = svc.start_ram_workload(
+            target_vm="Alpine-Linux",
+            allocated_mb=500000.0,
+            duration_sec=30,
+            initiated_by="admin"
+        )
+        self.assertFalse(reject_res["success"])
+        self.assertIn("Safety check rejected RAM allocation", reject_res["error"])
+
+        # Allocate safe 128 MB
+        safe_res = svc.start_ram_workload(
+            target_vm="Alpine-Linux",
+            allocated_mb=128.0,
+            duration_sec=30,
+            initiated_by="admin"
+        )
+        self.assertTrue(safe_res["success"])
+        session_id = safe_res["session_id"]
+
+        status = svc.get_status()
+        self.assertIsNotNone(status["running_ram_session"])
+
+        # Clean up
+        svc.stop_workload(session_id)
+
+    # 31. Database Workload Simulator & Student Record Safety
+    def test_31_database_workload_simulator_data_safety(self):
+        """Verify that Database workload exercises MariaDB without touching student/course records."""
+        from backend.services.workload_service import WorkloadSimulatorService
+        svc = WorkloadSimulatorService.get_instance()
+
+        # Count original students and courses
+        original_students = query_db("SELECT COUNT(*) as count FROM students")
+        original_courses = query_db("SELECT COUNT(*) as count FROM courses")
+
+        db_res = svc.start_database_workload(
+            target_vm="Alpine-DB",
+            intensity="low",
+            workers=1,
+            duration_sec=30,
+            initiated_by="admin"
+        )
+        self.assertTrue(db_res["success"])
+        session_id = db_res["session_id"]
+
+        time.sleep(0.5)
+
+        # Confirm original data was never modified or deleted
+        curr_students = query_db("SELECT COUNT(*) as count FROM students")
+        curr_courses = query_db("SELECT COUNT(*) as count FROM courses")
+        self.assertEqual(original_students[0]["count"], curr_students[0]["count"])
+        self.assertEqual(original_courses[0]["count"], curr_courses[0]["count"])
+
+        svc.stop_workload(session_id)
+
+    # 32. Emergency Stop Halts Active Workloads Immediately
+    def test_32_emergency_stop_halts_active_workloads(self):
+        """Verify that engaging Emergency Stop halts all active workload sessions."""
+        from backend.services.workload_service import WorkloadSimulatorService
+        svc = WorkloadSimulatorService.get_instance()
+
+        cpu_res = svc.start_cpu_workload("Alpine-Linux", intensity_percent=50.0, workers=1, duration_sec=60)
+        self.assertTrue(cpu_res["success"])
+        self.assertIsNotNone(svc.get_status()["running_cpu_session"])
+
+        # Engage Emergency Stop via monitor
+        monitor = XenResourceMonitor(self.config)
+        monitor.set_emergency_stop(True)
+
+        # Active workload must now be halted
+        status = svc.get_status()
+        self.assertIsNone(status["running_cpu_session"])
+        self.assertTrue(monitor.allocation_engine.emergency_stop)
+
+        # Disengage
+        monitor.set_emergency_stop(False)
+
+    # 33. Stale Telemetry Handling
+    def test_33_stale_telemetry_handling(self):
+        """Verify that stale telemetry holds scaling decisions to prevent erroneous actuation."""
+        vm_metrics = {
+            "name": "Alpine-Linux",
+            "uuid": "app-vm-uuid-111",
+            "vcpu_count": 2,
+            "allocated_ram_mb": 2048.0,
+            "cpu_percent": 99.0,
+            "ram_percent": 99.0,
+            "is_stale": True
+        }
+        dec = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec["cpu_action"], "HOLD")
+        self.assertEqual(dec["ram_action"], "HOLD")
+        self.assertIn("stale or offline", dec["rationale"])
+
+    # 34. Unsupported Hotplug / Ballooning Reports Maintenance Required
+    def test_34_unsupported_hotplug_maintenance(self):
+        """Verify that unsupported CPU hotplug or ballooning reports maintenance requirement."""
+        vm_metrics = {
+            "name": "Alpine-Linux",
+            "uuid": "app-vm-uuid-111",
+            "vcpu_count": 3,
+            "allocated_ram_mb": 2560.0,
+            "cpu_percent": 10.0,
+            "ram_percent": 20.0,
+            "supports_vcpu_hotplug": False,
+            "supports_ballooning": False
+        }
+        # Run through 6 consecutive intervals to trigger scale-down evaluation
+        for _ in range(5):
+            self.engine.evaluate_vm(vm_metrics)
+        dec = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec["cpu_action"], "MAINTENANCE_REQUIRED")
+        self.assertEqual(dec["ram_action"], "MAINTENANCE_REQUIRED")
+        self.assertIn("maintenance", dec["rationale"].lower())
 
 
 if __name__ == "__main__":

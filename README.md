@@ -97,6 +97,7 @@ XenLearn/
 │       ├── dashboard_service.py    # MariaDB statistical aggregation
 │       ├── enrollment_service.py   # Enrollment logic & duplicate prevention
 │       ├── student_service.py      # Student profile & user account linkage
+│       ├── workload_service.py     # Live CPU, RAM, & MariaDB transactional workload simulator
 │       └── xen_service.py          # Xen monitoring engine service interface
 ├── frontend/
 │   ├── app.py                      # Streamlit entrypoint & authentication routing
@@ -156,6 +157,8 @@ XenLearn/
 4. **`enrollments`:** Junction table with `UNIQUE (student_id, course_id)` to prevent duplicate enrollments.
 5. **`vm_metrics_history`:** Time-series telemetry storage for host & VM metrics (`timestamp`, `vm_name`, `vm_uuid`, `entity_type`, `cpu_percent`, `ram_percent`, `allocated_ram_mb`, `used_ram_mb`, `vcpu_count`, `network_rx_bytes`, `network_tx_bytes`).
 6. **`allocation_decisions_history`:** Audit trail for Phase 3 elasticity recommendations (`vm_name`, `cpu_action`, `ram_action`, `current_vcpus`, `recommended_vcpus`, `current_ram_mb`, `recommended_ram_mb`, `rationale`, `cooldown_active`).
+7. **`workload_simulation_sessions`:** Audit and session tracking for live synthetic CPU, RAM, and MariaDB workload generators (`session_id`, `vm_name`, `workload_type`, `intensity`, `duration_seconds`, `status`, `started_at`, `stopped_at`, `error_message`).
+8. **`workload_simulation_test`:** Dedicated isolated transient table used solely for synthetic MariaDB transaction simulation, ensuring core student, course, and enrollment data remain completely isolated and unaffected.
 
 ---
 
@@ -351,6 +354,49 @@ curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/ram \
   -d '{"vm_name":"Alpine-Linux", "ram_mb": 2560.0, "reason":"Memory expansion"}'
 ```
 
+### 21. Live Workload Simulator: Start CPU Stress
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/workload/cpu \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-Linux", "intensity": 75.0, "workers": 2, "duration_seconds": 60}'
+```
+
+### 22. Live Workload Simulator: Start RAM Allocation
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/workload/ram \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-Linux", "ram_mb": 256.0, "duration_seconds": 60}'
+```
+
+### 23. Live Workload Simulator: Start MariaDB Synthetic Load
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/workload/db \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-DB", "qps": 20.0, "duration_seconds": 60}'
+```
+
+### 24. Live Workload Simulator: Status & Active Sessions
+```bash
+curl -s http://10.189.191.51:5000/api/xen/workload/status
+```
+
+### 25. Emergency Stop (All Workloads + Scaling Halted Immediately)
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/workload/emergency-stop \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
+
+### 26. Safe Baseline Transition (1 vCPU, 1024 MB RAM)
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/transition-baseline \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"vm_name":"Alpine-Linux"}'
+```
+
 ---
 
 ## 10. Xen-Based Dynamic Resource Allocation (Phase 1, 2 & 3)
@@ -366,30 +412,37 @@ The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scala
 - Normalized physical host hardware metrics (cores, CPU %, total/available RAM) and guest telemetry.
 - Telemetry persistence into `vm_metrics_history` and `allocation_decisions_history`.
 
-### Phase 3: Dynamic CPU and RAM Resource Allocation (Complete)
-Implemented in `xen_monitor/xen_api_client.py`, `xen_monitor/allocation_engine.py`, `xen_monitor/resource_monitor.py`, and `frontend/pages/dynamic_allocation.py`:
-1. **Real XenAPI Live Actuation:**
+### Phase 3: Dynamic Autoscaling Engine & Live Workload Simulator (Complete)
+Implemented in `xen_monitor/xen_api_client.py`, `xen_monitor/allocation_engine.py`, `xen_monitor/resource_monitor.py`, `backend/services/workload_service.py`, and `frontend/pages/dynamic_allocation.py`:
+1. **Target Baseline Architecture:**
+   - **Application VM (`Alpine-Linux`):** Baseline target of 1 vCPU and 1024 MB RAM (Min: 1 vCPU, 1024 MB RAM; Max: 4 vCPUs, 4096 MB RAM).
+   - **Database VM (`Alpine-DB`):** Baseline target of 1 vCPU and 1024 MB RAM (Min: 1 vCPU, 1024 MB RAM; Max: 4 vCPUs, 4096 MB RAM), with isolated transactional safety validation.
+   - **Safe Baseline Transition:** One-click transition procedure that steps down resources safely while verifying VM liveness, host headroom, and guest OOM prevention limits.
+2. **Real XenAPI Live Actuation:**
    - **Live vCPU Scaling:** Actuates live CPU hotplugging via `VM.set_VCPUs_number_live` and persists configuration via `VM.set_VCPUs_at_startup`.
    - **Dynamic Memory Ballooning:** Modifies Xen dynamic memory range via `VM.set_memory_dynamic_range` and adjusts live target via `VM.set_memory_target_live` with strict limit verification (`static_min <= dynamic_min <= dynamic_max <= static_max`).
    - **Post-Change Verification:** Re-queries VM records via XenAPI to confirm the hypervisor accepted the modification.
-2. **Intelligent Allocation Engine:**
-   - **Threshold Rules:** CPU >80% scales up (+1 vCPU up to 4); CPU <25% scales down (-1 vCPU down to 1). RAM >85% scales up (+512 MB up to 4096 MB); RAM <30% scales down (-512 MB down to 1024 MB).
-   - **Independent Cooldowns:** Per-resource cooldown tracking `(VM, 'cpu')` and `(VM, 'ram')` ensures CPU cooldown does not block memory evaluation.
-   - **Hysteresis & Consecutive Breach Confirmation:** Requires 2 consecutive breaches to eliminate flapping on transient workload spikes.
-   - **Host Physical Capacity Interlock:** Checks physical host free RAM before scaling up dynamic memory ceilings.
-3. **Safety Interlocks & Emergency Stop:**
-   - `ALLOCATION_MODE=manual` by default. Autonomous closed-loop mode (`auto`) can be toggled by administrators.
-   - Immediate **Emergency Stop** switch blocks automated scaling without stopping or rebooting VMs.
-   - Strictly enforces safety invariant: Never reboots, halts, or migrates VMs automatically.
-4. **Administrator Control Panel (Streamlit):**
-   - Automation status banner, real-time VM resource cards, recommendations table with 1-click apply, manual CPU/RAM sliders with confirmation gates, audit history, and static vs. dynamic efficiency comparison.
+3. **Intelligent Allocation Engine with Asymmetric Hysteresis:**
+   - **Threshold Rules:** CPU >80% scales up (+1 vCPU up to 4); CPU <25% scales down (-1 vCPU down to 1). RAM >85% scales up (+512 MB up to 4096 MB); RAM <30% scales down (-512 MB down to 1024 MB, enforcing a 256 MB safety headroom over active usage).
+   - **Consecutive Breach Timing:** Requires **3 consecutive intervals** (>80% CPU or >85% RAM) for scale-up, and **6 consecutive intervals** (<25% CPU or <30% RAM) for scale-down to guarantee anti-thrashing stability.
+   - **Independent Cooldowns:** Per-resource cooldown tracking `(VM, 'cpu')` and `(VM, 'ram')` (60s) ensures CPU cooldown does not block memory evaluation.
+   - **Thread-Safe Actuation Lock:** Prevents race conditions and clashing XenAPI transactions across parallel requests.
+   - **Stale Telemetry Detection:** If metrics are older than 30s, the engine suspends automated scaling actions.
+   - **Maintenance Required Mode:** Detects if guest tools lack live hotplug/ballooning capability and cleanly reports `MAINTENANCE_REQUIRED` without crashing.
+4. **Live Workload Simulator:**
+   - **App VM CPU Stress Generator:** Calibrated mathematical workloads with configurable duty cycle (25%, 50%, 75%, 90%), worker count (1-4), and duration (30-180s).
+   - **App VM RAM Allocation Generator:** Allocates and touches resident memory pages (128 MB to 768 MB) with mandatory pre-flight host/guest OOM safety checks.
+   - **DB VM MariaDB Simulator:** Executes realistic read/write queries with explicit transaction rollbacks on dedicated transient table `workload_simulation_test`, guaranteeing zero modification or corruption of real student and course records.
+   - **Master Emergency Stop:** Immediately disengages autoscaling and terminates all active workload generators with one click.
+5. **Streamlit Dynamic Resource Allocation Dashboard:**
+   - Features Status Interlocks banner, Side-by-Side VM Baseline & Runtime telemetry, Live Workload Simulator control panel, Recommendations table with 1-click execution, Manual sliders with confirmation gates, Audit logs, 4 Real-time trend charts (including vCPU count and dynamic RAM), and Static vs. Dynamic efficiency analysis.
 
 ---
 
 ## 11. Running Automated Tests
 
-Run the complete automated test suite covering Phase 1 REST APIs, Phase 2 Xen monitoring engine, and Phase 3 Dynamic Allocation controller:
+Run the complete automated test suite covering Phase 1 REST APIs, Phase 2 Xen monitoring engine, and Phase 3 Dynamic Allocation & Workload Simulator:
 ```bash
 python3 -m unittest discover tests
 ```
-*Result: 52/52 tests passing (all 18+ Section 13 scenarios verified).*
+*Result: 64/64 tests passing with 100% success rate across all test suites.*

@@ -159,5 +159,35 @@ CREATE TABLE IF NOT EXISTS resource_allocation_history (
     INDEX idx_alloc_status (execution_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 10. Create workload simulation sessions table for live load generation tracking
+CREATE TABLE IF NOT EXISTS workload_simulation_sessions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL UNIQUE,
+    target_vm VARCHAR(100) NOT NULL,
+    workload_type VARCHAR(20) NOT NULL, -- 'cpu', 'ram', 'database'
+    intensity_percent FLOAT NULL,
+    workers INT NOT NULL DEFAULT 1,
+    allocated_mb FLOAT NULL,
+    duration_sec INT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'running', -- 'running', 'completed', 'stopped', 'error'
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    stopped_at TIMESTAMP NULL,
+    initiated_by VARCHAR(100) NOT NULL DEFAULT 'admin',
+    details TEXT NULL,
+    INDEX idx_sim_vm_status (target_vm, status),
+    INDEX idx_sim_time (started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 11. Create dedicated transient test table for safe MariaDB load generation
+-- Never interferes with real students, courses, enrollments or users tables
+CREATE TABLE IF NOT EXISTS workload_simulation_test (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    payload VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_sim_test_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 
 

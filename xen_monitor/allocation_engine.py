@@ -113,6 +113,20 @@ class AllocationEngine:
             self._save_decision(decision)
             return decision
 
+        # Stale telemetry check
+        if vm_metrics.get("is_stale", False):
+            reasons.append("VM telemetry is stale or offline. Automated scaling withheld until fresh metrics arrive.")
+            decision = self._format_decision(
+                now, vm_name, vm_metrics.get("uuid"),
+                "HOLD", "HOLD",
+                current_vcpus, current_vcpus,
+                allocated_ram, allocated_ram,
+                reasons, cpu_cd, ram_cd,
+                policy=policy
+            )
+            self._save_decision(decision)
+            return decision
+
         # Check if VM policy specifies preserving initial allocation (e.g. Alpine-DB baseline)
         if preserve_initial:
             reasons.append(
@@ -129,6 +143,9 @@ class AllocationEngine:
             )
             self._save_decision(decision)
             return decision
+
+        scale_up_intervals = getattr(self.config, "scale_up_consecutive_threshold", getattr(self.config, "consecutive_breach_threshold", 3))
+        scale_down_intervals = getattr(self.config, "scale_down_consecutive_threshold", 6)
 
         # -------------------------------------------------------------
         # 1. CPU ELASTICITY EVALUATION
@@ -153,10 +170,10 @@ class AllocationEngine:
                     f"High CPU workload ({cpu_pct}% > {cpu_scale_up_thresh}%), "
                     f"but CPU cooldown is active ({cpu_cd['remaining_sec']}s remaining)."
                 )
-            elif breach_count < self.config.consecutive_breach_threshold:
+            elif breach_count < scale_up_intervals:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"High CPU workload ({cpu_pct}%). Breaches: {breach_count}/{self.config.consecutive_breach_threshold} "
+                    f"High CPU workload ({cpu_pct}%). Breaches: {breach_count}/{scale_up_intervals} "
                     f"(awaiting consecutive confirmation to prevent flapping)."
                 )
             else:
@@ -184,19 +201,29 @@ class AllocationEngine:
                     f"Low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}%), "
                     f"but CPU cooldown is active ({cpu_cd['remaining_sec']}s remaining)."
                 )
-            elif breach_count < self.config.consecutive_breach_threshold:
+            elif breach_count < scale_down_intervals:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"Low CPU workload ({cpu_pct}%). Breaches: {breach_count}/{self.config.consecutive_breach_threshold} "
+                    f"Low CPU workload ({cpu_pct}%). Breaches: {breach_count}/{scale_down_intervals} "
                     f"(awaiting consecutive confirmation to prevent flapping)."
                 )
             else:
-                cpu_action = "SCALE_DOWN"
-                recommended_vcpus = max(min_vcpus, current_vcpus - 1)
-                reasons.append(
-                    f"Sustained low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}% over {breach_count} intervals). "
-                    f"Scale down vCPUs from {current_vcpus} to {recommended_vcpus} to optimize hypervisor cores."
-                )
+                # Check guest CPU hot-unplug capability
+                supports_hotplug = vm_metrics.get("supports_vcpu_hotplug", True)
+                if not supports_hotplug:
+                    cpu_action = "MAINTENANCE_REQUIRED"
+                    recommended_vcpus = max(min_vcpus, current_vcpus - 1)
+                    reasons.append(
+                        f"Low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}% over {breach_count} intervals). "
+                        f"Live vCPU hot-unplug unsupported by guest kernel; requires scheduled VM restart to apply {recommended_vcpus} vCPUs."
+                    )
+                else:
+                    cpu_action = "SCALE_DOWN"
+                    recommended_vcpus = max(min_vcpus, current_vcpus - 1)
+                    reasons.append(
+                        f"Sustained low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}% over {breach_count} intervals). "
+                        f"Scale down vCPUs from {current_vcpus} to {recommended_vcpus} to optimize hypervisor cores."
+                    )
         else:
             # Nominal CPU utilization
             self._consecutive_breaches[cpu_up_key] = 0
@@ -225,10 +252,10 @@ class AllocationEngine:
                     f"High RAM pressure ({ram_pct}% > {ram_scale_up_thresh}%), "
                     f"but RAM cooldown is active ({ram_cd['remaining_sec']}s remaining)."
                 )
-            elif breach_count < self.config.consecutive_breach_threshold:
+            elif breach_count < scale_up_intervals:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"High RAM pressure ({ram_pct}%). Breaches: {breach_count}/{self.config.consecutive_breach_threshold} "
+                    f"High RAM pressure ({ram_pct}%). Breaches: {breach_count}/{scale_up_intervals} "
                     f"(awaiting consecutive confirmation to prevent flapping)."
                 )
             else:
@@ -267,19 +294,39 @@ class AllocationEngine:
                     f"Low RAM workload ({ram_pct}% < {ram_scale_down_thresh}%), "
                     f"but RAM cooldown is active ({ram_cd['remaining_sec']}s remaining)."
                 )
-            elif breach_count < self.config.consecutive_breach_threshold:
+            elif breach_count < scale_down_intervals:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"Low RAM workload ({ram_pct}%). Breaches: {breach_count}/{self.config.consecutive_breach_threshold} "
+                    f"Low RAM workload ({ram_pct}%). Breaches: {breach_count}/{scale_down_intervals} "
                     f"(awaiting consecutive confirmation to prevent flapping)."
                 )
             else:
-                ram_action = "SCALE_DOWN"
-                recommended_ram_mb = max(min_ram_mb, allocated_ram - ram_inc)
-                reasons.append(
-                    f"Sustained low memory workload ({ram_pct}% < {ram_scale_down_thresh}% over {breach_count} intervals). "
-                    f"Reclaim hypervisor dynamic memory from {allocated_ram} MB to {recommended_ram_mb} MB."
-                )
+                # Safety check: ensure guest memory headroom
+                target_ram = max(min_ram_mb, allocated_ram - ram_inc)
+                used_ram = float(vm_metrics.get("used_ram_mb", 0.0))
+                min_safe_headroom = used_ram + 256.0
+
+                supports_ballooning = vm_metrics.get("supports_ballooning", True)
+                if not supports_ballooning:
+                    ram_action = "MAINTENANCE_REQUIRED"
+                    recommended_ram_mb = target_ram
+                    reasons.append(
+                        f"Low RAM workload ({ram_pct}% < {ram_scale_down_thresh}% over {breach_count} intervals). "
+                        f"Live memory ballooning unsupported or balloon driver offline; requires VM maintenance."
+                    )
+                elif used_ram > 0 and target_ram < min_safe_headroom:
+                    ram_action = "HOLD"
+                    reasons.append(
+                        f"RAM scale-down withheld: active guest consumption ({used_ram} MB) requires at least "
+                        f"{min_safe_headroom} MB safe headroom (target {target_ram} MB would risk guest OOM)."
+                    )
+                else:
+                    ram_action = "SCALE_DOWN"
+                    recommended_ram_mb = target_ram
+                    reasons.append(
+                        f"Sustained low memory workload ({ram_pct}% < {ram_scale_down_thresh}% over {breach_count} intervals). "
+                        f"Reclaim hypervisor dynamic memory from {allocated_ram} MB to {recommended_ram_mb} MB."
+                    )
         else:
             # Nominal RAM utilization
             self._consecutive_breaches[ram_up_key] = 0

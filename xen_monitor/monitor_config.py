@@ -41,26 +41,30 @@ class MonitorConfig:
         self.min_vcpus = int(os.getenv("MIN_VCPUS", "1"))
         self.max_vcpus = int(os.getenv("MAX_VCPUS", "4"))
         self.min_ram_mb = float(os.getenv("RAM_MIN_MB", os.getenv("MIN_RAM_MB", "1024.0")))
-        self.max_ram_mb = float(os.getenv("RAM_MAX_MB", os.getenv("MAX_RAM_MB", "6144.0")))
+        self.max_ram_mb = float(os.getenv("RAM_MAX_MB", os.getenv("MAX_RAM_MB", "4096.0")))
 
         # Application VM Specific Policy (Alpine-Linux)
-        self.app_vm_initial_ram_mb = float(os.getenv("APP_VM_INITIAL_RAM_MB", "4096.0"))
-        self.app_vm_min_ram_mb = float(os.getenv("APP_VM_MIN_RAM_MB", "2048.0"))
-        self.app_vm_max_ram_mb = float(os.getenv("APP_VM_MAX_RAM_MB", "6144.0"))
-        self.app_vm_initial_vcpus = int(os.getenv("APP_VM_INITIAL_VCPUS", "2"))
+        self.app_vm_initial_ram_mb = float(os.getenv("APP_VM_INITIAL_RAM_MB", "1024.0"))
+        self.app_vm_min_ram_mb = float(os.getenv("APP_VM_MIN_RAM_MB", "1024.0"))
+        self.app_vm_max_ram_mb = float(os.getenv("APP_VM_MAX_RAM_MB", "4096.0"))
+        self.app_vm_initial_vcpus = int(os.getenv("APP_VM_INITIAL_VCPUS", "1"))
         self.app_vm_min_vcpus = int(os.getenv("APP_VM_MIN_VCPUS", "1"))
         self.app_vm_max_vcpus = int(os.getenv("APP_VM_MAX_VCPUS", "4"))
 
         # Database VM Specific Policy (Alpine-DB - Independently Configurable)
+        self.db_vm_initial_ram_mb = float(os.getenv("DB_VM_INITIAL_RAM_MB", "1024.0"))
         self.db_vm_min_ram_mb = float(os.getenv("DB_VM_MIN_RAM_MB", "1024.0"))
         self.db_vm_max_ram_mb = float(os.getenv("DB_VM_MAX_RAM_MB", "4096.0"))
+        self.db_vm_initial_vcpus = int(os.getenv("DB_VM_INITIAL_VCPUS", "1"))
         self.db_vm_min_vcpus = int(os.getenv("DB_VM_MIN_VCPUS", "1"))
         self.db_vm_max_vcpus = int(os.getenv("DB_VM_MAX_VCPUS", "4"))
         self.db_vm_preserve_initial = os.getenv("DB_VM_PRESERVE_INITIAL", "True").lower() in ("true", "1", "t")
 
         # Boundaries & Cooldown Hysteresis
         self.cooldown_period_sec = int(os.getenv("COOLDOWN_PERIOD", os.getenv("SCALE_COOLDOWN_SEC", "60")))
-        self.consecutive_breach_threshold = int(os.getenv("CONSECUTIVE_BREACH_THRESHOLD", "2"))
+        self.scale_up_consecutive_threshold = int(os.getenv("SCALE_UP_CONSECUTIVE_THRESHOLD", os.getenv("CONSECUTIVE_BREACH_THRESHOLD", "3")))
+        self.scale_down_consecutive_threshold = int(os.getenv("SCALE_DOWN_CONSECUTIVE_THRESHOLD", "6"))
+        self.consecutive_breach_threshold = self.scale_up_consecutive_threshold
 
         # Operational Mode
         self.monitor_mode = os.getenv("MONITOR_MODE", "active")
@@ -94,8 +98,10 @@ class MonitorConfig:
                 "role": "database_server",
                 "min_vcpus": self.db_vm_min_vcpus,
                 "max_vcpus": self.db_vm_max_vcpus,
+                "initial_vcpus": self.db_vm_initial_vcpus,
                 "min_ram_mb": self.db_vm_min_ram_mb,
                 "max_ram_mb": self.db_vm_max_ram_mb,
+                "initial_ram_mb": self.db_vm_initial_ram_mb,
                 "cpu_scale_up_threshold": self.cpu_scale_up_threshold,
                 "cpu_scale_down_threshold": self.cpu_scale_down_threshold,
                 "ram_scale_up_threshold": self.ram_scale_up_threshold,

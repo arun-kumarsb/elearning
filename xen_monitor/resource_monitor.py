@@ -28,6 +28,7 @@ logger = logging.getLogger("ResourceMonitor")
 
 class XenResourceMonitor:
     _instance = None
+    _allocation_lock = threading.Lock()
 
     def __init__(self, config: Optional[MonitorConfig] = None):
         self.config = config or MonitorConfig()
@@ -76,8 +77,14 @@ class XenResourceMonitor:
         raise ValueError(f"Invalid allocation mode '{mode}'. Must be 'manual' or 'auto'.")
 
     def set_emergency_stop(self, enabled: bool) -> bool:
-        """Toggle emergency stop status."""
+        """Toggle emergency stop status and halt any active synthetic workloads."""
         self.allocation_engine.set_emergency_stop(enabled)
+        if enabled:
+            try:
+                from backend.services.workload_service import WorkloadSimulatorService
+                WorkloadSimulatorService.get_instance().stop_all_workloads()
+            except Exception as e:
+                logger.warning(f"Failed to stop active workloads during emergency stop: {e}")
         return self.allocation_engine.emergency_stop
 
     def start(self):
@@ -219,77 +226,83 @@ class XenResourceMonitor:
             # Only executes if ALLOCATION_MODE is 'auto' and emergency stop is NOT engaged
             # ---------------------------------------------------------
             if self.config.allocation_mode.lower() == "auto" and not self.allocation_engine.emergency_stop:
-                for target_vm_name, rec in recommendations.items():
-                    # Check CPU automated scaling
-                    if rec.get("cpu_action") in ("SCALE_UP", "SCALE_DOWN"):
-                        target_vcpus = rec.get("recommended_vcpus")
-                        if target_vcpus and target_vcpus != rec.get("current_vcpus"):
-                            logger.info(f"Auto-actuating CPU scaling for '{target_vm_name}': {rec.get('current_vcpus')} -> {target_vcpus}")
-                            res = self.client.set_vm_vcpus(target_vm_name, target_vcpus)
-                            status = "success" if res.get("success") else "failed"
-                            err = res.get("error")
-                            act_val = res.get("actual_value", rec.get("current_vcpus")) if status == "success" else None
-                            if status == "success":
-                                self.allocation_engine.record_action_applied(target_vm_name, "cpu")
-                            self._persist_allocation_action({
-                                "vm_name": target_vm_name,
-                                "vm_uuid": rec.get("vm_uuid"),
-                                "resource_type": "cpu",
-                                "previous_value": rec.get("current_vcpus"),
-                                "requested_value": target_vcpus,
-                                "actual_value": act_val,
-                                "trigger_reason": rec.get("rationale"),
-                                "action_type": "auto_scale",
-                                "execution_status": status,
-                                "error_message": err,
-                                "initiated_by": "auto"
-                            })
-                            if status == "success":
-                                self.last_xen_operation = {
-                                    "timestamp": now,
-                                    "timestamp_iso": iso_time,
-                                    "operation": "auto_scale_cpu",
-                                    "vm_name": target_vm_name,
-                                    "resource_type": "cpu",
-                                    "requested_value": target_vcpus,
-                                    "actual_value": act_val,
-                                    "status": "verified"
-                                }
+                if self._allocation_lock.acquire(blocking=False):
+                    try:
+                        for target_vm_name, rec in recommendations.items():
+                            # Check CPU automated scaling
+                            if rec.get("cpu_action") in ("SCALE_UP", "SCALE_DOWN"):
+                                target_vcpus = rec.get("recommended_vcpus")
+                                if target_vcpus and target_vcpus != rec.get("current_vcpus"):
+                                    logger.info(f"Auto-actuating CPU scaling for '{target_vm_name}': {rec.get('current_vcpus')} -> {target_vcpus}")
+                                    res = self.client.set_vm_vcpus(target_vm_name, target_vcpus)
+                                    status = "success" if res.get("success") else "failed"
+                                    err = res.get("error")
+                                    act_val = res.get("actual_value", rec.get("current_vcpus")) if status == "success" else None
+                                    if status == "success":
+                                        self.allocation_engine.record_action_applied(target_vm_name, "cpu")
+                                    self._persist_allocation_action({
+                                        "vm_name": target_vm_name,
+                                        "vm_uuid": rec.get("vm_uuid"),
+                                        "resource_type": "cpu",
+                                        "previous_value": rec.get("current_vcpus"),
+                                        "requested_value": target_vcpus,
+                                        "actual_value": act_val,
+                                        "trigger_reason": rec.get("rationale"),
+                                        "action_type": "auto_scale",
+                                        "execution_status": status,
+                                        "error_message": err,
+                                        "initiated_by": "auto"
+                                    })
+                                    if status == "success":
+                                        self.last_xen_operation = {
+                                            "timestamp": now,
+                                            "timestamp_iso": iso_time,
+                                            "operation": "auto_scale_cpu",
+                                            "vm_name": target_vm_name,
+                                            "resource_type": "cpu",
+                                            "requested_value": target_vcpus,
+                                            "actual_value": act_val,
+                                            "status": "verified"
+                                        }
 
-                    # Check RAM automated scaling
-                    if rec.get("ram_action") in ("SCALE_UP", "SCALE_DOWN"):
-                        target_ram = rec.get("recommended_ram_mb")
-                        if target_ram and target_ram != rec.get("current_ram_mb"):
-                            logger.info(f"Auto-actuating RAM ballooning for '{target_vm_name}': {rec.get('current_ram_mb')} -> {target_ram} MB")
-                            res = self.client.set_vm_dynamic_memory(target_vm_name, target_ram)
-                            status = "success" if res.get("success") else "failed"
-                            err = res.get("error")
-                            act_val = res.get("actual_value", rec.get("current_ram_mb")) if status == "success" else None
-                            if status == "success":
-                                self.allocation_engine.record_action_applied(target_vm_name, "ram")
-                                self.last_xen_operation = {
-                                    "timestamp": now,
-                                    "timestamp_iso": iso_time,
-                                    "operation": "auto_scale_ram",
-                                    "vm_name": target_vm_name,
-                                    "resource_type": "ram",
-                                    "requested_value": target_ram,
-                                    "actual_value": act_val,
-                                    "status": "verified"
-                                }
-                            self._persist_allocation_action({
-                                "vm_name": target_vm_name,
-                                "vm_uuid": rec.get("vm_uuid"),
-                                "resource_type": "ram",
-                                "previous_value": rec.get("current_ram_mb"),
-                                "requested_value": target_ram,
-                                "actual_value": act_val,
-                                "trigger_reason": rec.get("rationale"),
-                                "action_type": "auto_scale",
-                                "execution_status": status,
-                                "error_message": err,
-                                "initiated_by": "auto"
-                            })
+                            # Check RAM automated scaling
+                            if rec.get("ram_action") in ("SCALE_UP", "SCALE_DOWN"):
+                                target_ram = rec.get("recommended_ram_mb")
+                                if target_ram and target_ram != rec.get("current_ram_mb"):
+                                    logger.info(f"Auto-actuating RAM ballooning for '{target_vm_name}': {rec.get('current_ram_mb')} -> {target_ram} MB")
+                                    res = self.client.set_vm_dynamic_memory(target_vm_name, target_ram)
+                                    status = "success" if res.get("success") else "failed"
+                                    err = res.get("error")
+                                    act_val = res.get("actual_value", rec.get("current_ram_mb")) if status == "success" else None
+                                    if status == "success":
+                                        self.allocation_engine.record_action_applied(target_vm_name, "ram")
+                                        self.last_xen_operation = {
+                                            "timestamp": now,
+                                            "timestamp_iso": iso_time,
+                                            "operation": "auto_scale_ram",
+                                            "vm_name": target_vm_name,
+                                            "resource_type": "ram",
+                                            "requested_value": target_ram,
+                                            "actual_value": act_val,
+                                            "status": "verified"
+                                        }
+                                    self._persist_allocation_action({
+                                        "vm_name": target_vm_name,
+                                        "vm_uuid": rec.get("vm_uuid"),
+                                        "resource_type": "ram",
+                                        "previous_value": rec.get("current_ram_mb"),
+                                        "requested_value": target_ram,
+                                        "actual_value": act_val,
+                                        "trigger_reason": rec.get("rationale"),
+                                        "action_type": "auto_scale",
+                                        "execution_status": status,
+                                        "error_message": err,
+                                        "initiated_by": "auto"
+                                    })
+                    finally:
+                        self._allocation_lock.release()
+                else:
+                    logger.debug("Allocation lock active; skipping automated scaling check this cycle.")
 
             self.last_successful_update = now
             self.consecutive_failures = 0
@@ -343,73 +356,145 @@ class XenResourceMonitor:
     # -----------------------------------------------------------------
     def apply_manual_cpu(self, vm_identifier: str, target_vcpus: int, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
         """Manually actuate vCPU modification via XenAPI and record audit log."""
-        res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
-        vm_name = res.get("vm_name") or vm_identifier
-        vm_uuid = res.get("vm_uuid")
-        status = "success" if res.get("success") else "failed"
+        with self._allocation_lock:
+            res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
+            vm_name = res.get("vm_name") or vm_identifier
+            vm_uuid = res.get("vm_uuid")
+            status = "success" if res.get("success") else "failed"
 
-        if status == "success":
-            self.allocation_engine.record_action_applied(vm_name, "cpu")
-            self.last_xen_operation = {
-                "timestamp": time.time(),
-                "timestamp_iso": datetime.now(timezone.utc).isoformat(),
-                "operation": "manual_cpu",
+            if status == "success":
+                self.allocation_engine.record_action_applied(vm_name, "cpu")
+                self.last_xen_operation = {
+                    "timestamp": time.time(),
+                    "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                    "operation": "manual_cpu",
+                    "vm_name": vm_name,
+                    "resource_type": "cpu",
+                    "requested_value": target_vcpus,
+                    "actual_value": res.get("actual_value"),
+                    "status": "verified"
+                }
+
+            self._persist_allocation_action({
                 "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
                 "resource_type": "cpu",
+                "previous_value": res.get("previous_value"),
                 "requested_value": target_vcpus,
                 "actual_value": res.get("actual_value"),
-                "status": "verified"
-            }
-
-        self._persist_allocation_action({
-            "vm_name": vm_name,
-            "vm_uuid": vm_uuid,
-            "resource_type": "cpu",
-            "previous_value": res.get("previous_value"),
-            "requested_value": target_vcpus,
-            "actual_value": res.get("actual_value"),
-            "trigger_reason": reason,
-            "action_type": "manual_cpu",
-            "execution_status": status,
-            "error_message": res.get("error"),
-            "initiated_by": initiated_by
-        })
-        return res
+                "trigger_reason": reason,
+                "action_type": "manual_cpu",
+                "execution_status": status,
+                "error_message": res.get("error"),
+                "initiated_by": initiated_by
+            })
+            return res
 
     def apply_manual_ram(self, vm_identifier: str, target_ram_mb: float, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
         """Manually actuate dynamic memory ballooning via XenAPI and record audit log."""
-        res = self.client.set_vm_dynamic_memory(vm_identifier, target_ram_mb)
-        vm_name = res.get("vm_name") or vm_identifier
-        vm_uuid = res.get("vm_uuid")
-        status = "success" if res.get("success") else "failed"
+        with self._allocation_lock:
+            res = self.client.set_vm_dynamic_memory(vm_identifier, target_ram_mb)
+            vm_name = res.get("vm_name") or vm_identifier
+            vm_uuid = res.get("vm_uuid")
+            status = "success" if res.get("success") else "failed"
 
-        if status == "success":
-            self.allocation_engine.record_action_applied(vm_name, "ram")
-            self.last_xen_operation = {
-                "timestamp": time.time(),
-                "timestamp_iso": datetime.now(timezone.utc).isoformat(),
-                "operation": "manual_ram",
+            if status == "success":
+                self.allocation_engine.record_action_applied(vm_name, "ram")
+                self.last_xen_operation = {
+                    "timestamp": time.time(),
+                    "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                    "operation": "manual_ram",
+                    "vm_name": vm_name,
+                    "resource_type": "ram",
+                    "requested_value": target_ram_mb,
+                    "actual_value": res.get("actual_value"),
+                    "status": "verified"
+                }
+
+            self._persist_allocation_action({
                 "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
                 "resource_type": "ram",
+                "previous_value": res.get("previous_value"),
                 "requested_value": target_ram_mb,
                 "actual_value": res.get("actual_value"),
-                "status": "verified"
-            }
+                "trigger_reason": reason,
+                "action_type": "manual_ram",
+                "execution_status": status,
+                "error_message": res.get("error"),
+                "initiated_by": initiated_by
+            })
+            return res
 
-        self._persist_allocation_action({
-            "vm_name": vm_name,
-            "vm_uuid": vm_uuid,
-            "resource_type": "ram",
-            "previous_value": res.get("previous_value"),
-            "requested_value": target_ram_mb,
-            "actual_value": res.get("actual_value"),
-            "trigger_reason": reason,
-            "action_type": "manual_ram",
-            "execution_status": status,
-            "error_message": res.get("error"),
-            "initiated_by": initiated_by
-        })
-        return res
+    def transition_to_baseline(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
+        """
+        Safely transitions a VM from current configuration to baseline policy (1 vCPU, 1024 MB RAM)
+        with host verification and audit logging.
+        """
+        with self._allocation_lock:
+            policy = self.config.get_vm_policy(vm_identifier)
+            target_vcpus = policy.get("initial_vcpus", 1)
+            target_ram_mb = policy.get("initial_ram_mb", 1024.0)
+
+            # 1. vCPU Transition
+            cpu_res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
+            cpu_ok = cpu_res.get("success", False)
+            if cpu_ok:
+                self.allocation_engine.record_action_applied(vm_identifier, "cpu")
+            self._persist_allocation_action({
+                "vm_name": vm_identifier,
+                "vm_uuid": cpu_res.get("vm_uuid"),
+                "resource_type": "cpu",
+                "previous_value": cpu_res.get("previous_value"),
+                "requested_value": target_vcpus,
+                "actual_value": cpu_res.get("actual_value"),
+                "trigger_reason": "Baseline transition approved by administrator",
+                "action_type": "baseline_transition",
+                "execution_status": "success" if cpu_ok else "failed",
+                "error_message": cpu_res.get("error"),
+                "initiated_by": initiated_by
+            })
+
+            # 2. RAM Transition
+            ram_res = self.client.set_vm_dynamic_memory(vm_identifier, target_ram_mb)
+            ram_ok = ram_res.get("success", False)
+            if ram_ok:
+                self.allocation_engine.record_action_applied(vm_identifier, "ram")
+            self._persist_allocation_action({
+                "vm_name": vm_identifier,
+                "vm_uuid": ram_res.get("vm_uuid"),
+                "resource_type": "ram",
+                "previous_value": ram_res.get("previous_value"),
+                "requested_value": target_ram_mb,
+                "actual_value": ram_res.get("actual_value"),
+                "trigger_reason": "Baseline transition approved by administrator",
+                "action_type": "baseline_transition",
+                "execution_status": "success" if ram_ok else "failed",
+                "error_message": ram_res.get("error"),
+                "initiated_by": initiated_by
+            })
+
+            all_ok = cpu_ok and ram_ok
+            if all_ok:
+                self.last_xen_operation = {
+                    "timestamp": time.time(),
+                    "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                    "operation": "baseline_transition",
+                    "vm_name": vm_identifier,
+                    "resource_type": "cpu_and_ram",
+                    "requested_value": f"{target_vcpus} vCPU / {target_ram_mb} MB",
+                    "actual_value": f"{cpu_res.get('actual_value')} vCPU / {ram_res.get('actual_value')} MB",
+                    "status": "verified"
+                }
+
+            return {
+                "success": all_ok,
+                "vm_name": vm_identifier,
+                "target_baseline": {"vcpus": target_vcpus, "ram_mb": target_ram_mb},
+                "cpu_result": cpu_res,
+                "ram_result": ram_res,
+                "message": f"Successfully transitioned '{vm_identifier}' to baseline ({target_vcpus} vCPU, {target_ram_mb} MB RAM)!" if all_ok else f"Baseline transition incomplete: CPU ({cpu_res.get('error') or 'OK'}), RAM ({ram_res.get('error') or 'OK'})."
+            }
 
     def apply_recommended_action(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
         """Apply pending recommendation for a specific VM."""

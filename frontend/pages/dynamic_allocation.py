@@ -2,12 +2,13 @@
 Streamlit Page: Dynamic Resource Allocation Control Panel (Phase 3)
 Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 
-Provides administrator controls for automated and manual Xen hypervisor scaling:
-- Automation status, XenAPI connection & Emergency Stop
-- Real-time VM resource cards (configured limits vs. actual allocations, guest ballooning/hotplug capabilities)
-- Elasticity recommendations table & 1-click apply
-- Manual CPU & RAM adjustment with confirmation gates and per-VM limits validation
-- Audit history & Static vs. Dynamic efficiency analysis
+Provides comprehensive administrator controls for Xen hypervisor autoscaling:
+- Section A: Automation controller status, XenAPI health, and emergency interlocks
+- Section B: Real-time side-by-side VM resource cards (configured vs. actual allocations, guest ballooning/hotplug capabilities)
+- Section C: Live Workload Simulator (authentic CPU, RAM, and Database synthetic load generation with OOM protection)
+- Section D: Real-time elasticity recommendations with 1-click apply
+- Section E: Administrator manual allocation controls & safe baseline transition
+- Section F: Historical audit trail, telemetry trend charts (CPU, RAM, vCPU count, memory allocation), event timeline, and efficiency analysis
 """
 
 import os
@@ -15,7 +16,7 @@ import time
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from frontend.api import (
     api_get_xen_metrics,
@@ -29,14 +30,23 @@ from frontend.api import (
     api_apply_manual_cpu,
     api_apply_manual_ram,
     api_apply_recommended,
-    api_get_xen_history
+    api_get_xen_history,
+    api_transition_to_baseline,
+    api_get_workload_status,
+    api_start_cpu_workload,
+    api_stop_cpu_workload,
+    api_start_ram_workload,
+    api_stop_ram_workload,
+    api_start_db_workload,
+    api_stop_db_workload,
+    api_workload_emergency_stop
 )
 from frontend.components.cards import render_section_title, render_metric_card
 
 def render_dynamic_allocation_page():
     render_section_title(
         "⚡ Dynamic Resource Allocation",
-        "Autonomous elasticity controller & administrator actuation panel for XCP-ng / Xen"
+        "Autonomous elasticity controller, live workload simulator & administrator actuation panel for XCP-ng / Xen"
     )
 
     # -------------------------------------------------------------
@@ -55,17 +65,19 @@ def render_dynamic_allocation_page():
     with col_bar3:
         auto_refresh = st.checkbox("Auto-refresh (5s)", value=False, key="dyn_auto_refresh")
 
-    # Fetch live state
+    # Fetch live state from backend APIs
     with st.spinner("Connecting to Xen Allocation Controller..."):
         alloc_status_resp = api_get_allocation_status()
         metrics_resp = api_get_xen_metrics()
         monitor_status_resp = api_get_xen_monitor_status()
         alloc_history_resp = api_get_allocation_history(limit=50)
+        workload_status_resp = api_get_workload_status()
 
     alloc_data = alloc_status_resp.get("data", {}) if alloc_status_resp.get("success") else {}
     metrics_data = metrics_resp.get("data", {}) if metrics_resp.get("success") else {}
     monitor_data = monitor_status_resp.get("data", {}) if monitor_status_resp.get("success") else {}
     history_records = alloc_history_resp.get("data", []) if alloc_history_resp.get("success") else []
+    workload_data = workload_status_resp.get("data", {}) if workload_status_resp.get("success") else {}
 
     is_connected = metrics_data.get("connected", False)
     mode = alloc_data.get("allocation_mode", "manual").upper()
@@ -84,14 +96,14 @@ def render_dynamic_allocation_page():
         last_op_str = "None executed yet"
 
     # =============================================================
-    # SECTION A: AUTOMATION STATUS
+    # SECTION A: AUTOMATION STATUS & SAFETY INTERLOCKS
     # =============================================================
-    st.markdown("### 🎛️ **A. Automation Controller Status**")
+    st.markdown("### 🎛️ **A. Automation Controller & Safety Mode**")
 
     # Emergency stop alert banner if engaged
     if emergency_stop:
         st.error(
-            "🚨 **EMERGENCY STOP ENGAGED**: All automated dynamic scaling operations are currently blocked! "
+            "🚨 **EMERGENCY STOP ENGAGED**: All automated dynamic scaling and active synthetic load tests are currently halted! "
             "VMs remain running without interruption. Disengage below to resume automated scaling."
         )
 
@@ -105,7 +117,7 @@ def render_dynamic_allocation_page():
         render_metric_card("Allocation Mode", mode_badge, "Autonomous closed-loop scaling" if mode == "AUTO" else "Admin authorization required")
     with sc3:
         estop_badge = "🚨 ENGAGED" if emergency_stop else "✅ Normal (Clear)"
-        render_metric_card("Emergency Stop", estop_badge, "Automated scaling blocked" if emergency_stop else "Automated actuation permitted")
+        render_metric_card("Emergency Stop", estop_badge, "Scaling & load tests suspended" if emergency_stop else "Automated actuation permitted")
     with sc4:
         render_metric_card("Polling Interval", f"{poll_interval}s", f"Last sync: {last_update[-8:] if len(last_update) > 8 else last_update}")
 
@@ -120,7 +132,7 @@ def render_dynamic_allocation_page():
     st.markdown("---")
 
     # =============================================================
-    # SECTION B: VM RESOURCE CARDS (Configured vs Actual Allocations)
+    # SECTION B: VM RESOURCE CARDS (Both VMs Side by Side)
     # =============================================================
     st.markdown("### 🖥️ **B. Virtual Machine Resource Allocations & Telemetry**")
 
@@ -157,7 +169,7 @@ def render_dynamic_allocation_page():
             <div style="background:#F8FAFC; border:1px solid #CBD5E1; border-top:4px solid #3B82F6; padding:16px; border-radius:10px; margin-bottom:15px;">
                 <h4 style="margin:0 0 6px 0; color:#1E3A8A;">🖥️ Application VM: {app_vm.get('name', app_vm_name)}</h4>
                 <div style="font-size:0.8rem; color:#64748B; margin-bottom:8px;">
-                    UUID: <code>{app_vm.get('uuid', 'N/A')}</code> | State: <b>{app_vm.get('power_state', 'N/A')}</b>
+                    UUID: <code>{app_vm.get('uuid', 'N/A')}</code> | State: <b>{app_vm.get('power_state', 'Running')}</b>
                 </div>
                 <div style="font-size:0.75rem; color:#475569; margin-bottom:12px;">
                     Guest Ballooning: <b>{'🟢 Supported' if app_vm.get('supports_ballooning') else '⚪ Unsupported'}</b> |
@@ -172,12 +184,22 @@ def render_dynamic_allocation_page():
             st.metric("vCPUs (Actual / Limit)", f"{app_vm.get('vcpu_count', 'N/A')} / {app_policy.get('max_vcpus', 4)}")
             st.metric("CPU Utilization", f"{app_vm.get('cpu_percent', 'N/A')}%")
             st.metric("Recommended vCPUs", f"{app_rec.get('recommended_vcpus', app_vm.get('vcpu_count', 'N/A'))}")
-            st.caption(f"Configured vCPU Range: **{app_policy.get('min_vcpus', 1)} – {app_policy.get('max_vcpus', 4)}**")
+            st.caption(f"Configured vCPU Policy: **{app_policy.get('min_vcpus', 1)} – {app_policy.get('max_vcpus', 4)}**")
         with c2:
             st.metric("Allocated Dynamic RAM", f"{app_vm.get('allocated_ram_mb', 'N/A')} MB")
             st.metric("Actual Guest Used RAM", f"{app_vm.get('used_ram_mb', 'N/A')} MB ({app_vm.get('ram_percent', 'N/A')}%)")
-            st.metric("Recommended RAM", f"{app_rec.get('recommended_ram_mb', app_vm.get('allocated_ram_mb', 'N/A'))} MB")
-            st.caption(f"Configured RAM Range: **{app_policy.get('min_ram_mb', 2048)} – {app_policy.get('max_ram_mb', 6144)} MB**")
+            st.metric("Guest Available RAM", f"{app_vm.get('available_ram_mb', 'N/A')} MB")
+            st.caption(f"Configured RAM Policy: **{app_policy.get('min_ram_mb', 1024)} – {app_policy.get('max_ram_mb', 4096)} MB**")
+
+        if st.button("🎯 Transition App VM to 1 vCPU / 1024 MB Baseline", key="trans_app_btn", use_container_width=True):
+            with st.spinner("Actuating safe baseline transition for Alpine-Linux..."):
+                res = api_transition_to_baseline(app_vm.get("name", app_vm_name))
+            if res.get("success"):
+                st.success(res.get("message", "App VM transitioned to baseline!"))
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Transition error: {res.get('error', res.get('message'))}")
 
     with col_vm2:
         st.markdown(
@@ -185,7 +207,7 @@ def render_dynamic_allocation_page():
             <div style="background:#F8FAFC; border:1px solid #CBD5E1; border-top:4px solid #10B981; padding:16px; border-radius:10px; margin-bottom:15px;">
                 <h4 style="margin:0 0 6px 0; color:#065F46;">🗄️ Database VM: {db_vm.get('name', db_vm_name)}</h4>
                 <div style="font-size:0.8rem; color:#64748B; margin-bottom:8px;">
-                    UUID: <code>{db_vm.get('uuid', 'N/A')}</code> | State: <b>{db_vm.get('power_state', 'N/A')}</b>
+                    UUID: <code>{db_vm.get('uuid', 'N/A')}</code> | State: <b>{db_vm.get('power_state', 'Running')}</b>
                 </div>
                 <div style="font-size:0.75rem; color:#475569; margin-bottom:12px;">
                     Guest Ballooning: <b>{'🟢 Supported' if db_vm.get('supports_ballooning') else '⚪ Unsupported'}</b> |
@@ -200,19 +222,210 @@ def render_dynamic_allocation_page():
             st.metric("vCPUs (Actual / Limit)", f"{db_vm.get('vcpu_count', 'N/A')} / {db_policy.get('max_vcpus', 4)}")
             st.metric("CPU Utilization", f"{db_vm.get('cpu_percent', 'N/A')}%")
             st.metric("Recommended vCPUs", f"{db_rec.get('recommended_vcpus', db_vm.get('vcpu_count', 'N/A'))}")
-            st.caption(f"Configured vCPU Range: **{db_policy.get('min_vcpus', 1)} – {db_policy.get('max_vcpus', 4)}**")
+            st.caption(f"Configured vCPU Policy: **{db_policy.get('min_vcpus', 1)} – {db_policy.get('max_vcpus', 4)}**")
         with c2:
             st.metric("Allocated Dynamic RAM", f"{db_vm.get('allocated_ram_mb', 'N/A')} MB")
             st.metric("Actual Guest Used RAM", f"{db_vm.get('used_ram_mb', 'N/A')} MB ({db_vm.get('ram_percent', 'N/A')}%)")
-            st.metric("Recommended RAM", f"{db_rec.get('recommended_ram_mb', db_vm.get('allocated_ram_mb', 'N/A'))} MB")
-            st.caption(f"Configured RAM Range: **{db_policy.get('min_ram_mb', 1024)} – {db_policy.get('max_ram_mb', 4096)} MB**")
+            st.metric("Guest Available RAM", f"{db_vm.get('available_ram_mb', 'N/A')} MB")
+            st.caption(f"Configured RAM Policy: **{db_policy.get('min_ram_mb', 1024)} – {db_policy.get('max_ram_mb', 4096)} MB**")
+
+        if st.button("🎯 Transition DB VM to 1 vCPU / 1024 MB Baseline", key="trans_db_btn", use_container_width=True):
+            with st.spinner("Actuating safe baseline transition for Alpine-DB..."):
+                res = api_transition_to_baseline(db_vm.get("name", db_vm_name))
+            if res.get("success"):
+                st.success(res.get("message", "DB VM transitioned to baseline!"))
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Transition error: {res.get('error', res.get('message'))}")
 
     st.markdown("---")
 
     # =============================================================
-    # SECTION C: ALLOCATION RECOMMENDATIONS
+    # SECTION C: LIVE WORKLOAD SIMULATOR (Major Demonstration Feature)
     # =============================================================
-    st.markdown("### 📋 **C. Real-Time Elasticity Recommendations**")
+    st.markdown("### 🔥 **C. Live Workload Simulator**")
+    st.caption(
+        "Generate controlled, authentic synthetic CPU, RAM, and Database workloads to test and demonstrate "
+        "real-time Xen autoscaling and live ballooning. Workloads run inside guest VMs with strict safety limits."
+    )
+
+    # Emergency stop for all workloads
+    c_stop1, c_stop2 = st.columns([3, 1])
+    with c_stop2:
+        if st.button("🛑 Stop All Active Workloads", key="stop_all_sim_btn", type="primary", use_container_width=True):
+            with st.spinner("Halting all synthetic workload generators..."):
+                stop_res = api_workload_emergency_stop()
+            if stop_res.get("success"):
+                st.warning(stop_res.get("message", "All active workloads halted."))
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Error: {stop_res.get('error')}")
+
+    sim_tab1, sim_tab2, sim_tab3 = st.tabs([
+        "🖥️ Application VM Workloads (CPU & RAM)",
+        "🗄️ Database VM Workload (MariaDB)",
+        "📜 Active Workload Sessions"
+    ])
+
+    # Tab 1: App VM Workloads
+    with sim_tab1:
+        st.markdown("#### Synthetic Load for `Alpine-Linux` (Application VM)")
+        w_col1, w_col2 = st.columns(2)
+
+        # CPU Load Controls
+        with w_col1:
+            st.markdown(
+                """
+                <div style="background:#EFF6FF; border:1px solid #BFDBFE; padding:12px; border-radius:8px; margin-bottom:10px;">
+                    <b style="color:#1D4ED8;">⚡ CPU Load Generator</b><br/>
+                    <small style="color:#4B5563;">Calibrated mathematical computation duty cycle to breach >80% threshold.</small>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            running_cpu = workload_data.get("running_cpu_session")
+            if running_cpu:
+                st.success(f"🟢 **CPU Load Active**: {running_cpu.get('intensity_percent')}% intensity across {running_cpu.get('workers')} worker(s)")
+                st.write(f"Started: {running_cpu.get('started_at', '')[:19]} (Duration: {running_cpu.get('duration_sec')}s)")
+                if st.button("⏹️ Stop CPU Load", key="stop_cpu_btn", use_container_width=True):
+                    api_stop_cpu_workload(running_cpu.get("session_id"))
+                    st.rerun()
+            else:
+                cpu_intensity = st.select_slider(
+                    "Target CPU Intensity (%)",
+                    options=[25.0, 50.0, 75.0, 90.0],
+                    value=75.0,
+                    help="Select intensity: 90% triggers scale-up (>80%), 25% allows scale-down (<25%)."
+                )
+                cpu_workers = st.selectbox("Worker Threads", options=[1, 2, 3, 4], index=1)
+                cpu_duration = st.selectbox("Duration (seconds)", options=[30, 60, 120, 180], index=1)
+
+                if st.button("🚀 Start CPU Load Test", key="start_cpu_btn", type="primary", use_container_width=True):
+                    with st.spinner("Starting CPU workload generator on Alpine-Linux..."):
+                        c_res = api_start_cpu_workload(
+                            target_vm=app_vm.get("name", app_vm_name),
+                            intensity_percent=cpu_intensity,
+                            workers=cpu_workers,
+                            duration_sec=cpu_duration
+                        )
+                    if c_res.get("success"):
+                        st.success(c_res.get("message", "CPU load started!"))
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {c_res.get('error')}")
+
+        # RAM Load Controls
+        with w_col2:
+            st.markdown(
+                """
+                <div style="background:#FDF2F8; border:1px solid #FBCFE8; padding:12px; border-radius:8px; margin-bottom:10px;">
+                    <b style="color:#BE185D;">🎈 RAM Load Generator</b><br/>
+                    <small style="color:#4B5563;">Commits real physical heap pages with OOM headroom protection.</small>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            running_ram = workload_data.get("running_ram_session")
+            guest_avail_ram = workload_data.get("guest_available_ram_mb", 2048.0)
+            st.caption(f"Current Guest Available RAM: **{guest_avail_ram} MB** (Minimum 256 MB safety cushion enforced)")
+
+            if running_ram:
+                st.success(f"🟢 **RAM Load Active**: {running_ram.get('allocated_mb')} MB allocated in heap")
+                st.write(f"Started: {running_ram.get('started_at', '')[:19]} (Duration: {running_ram.get('duration_sec')}s)")
+                if st.button("⏹️ Stop RAM Load & Free Memory", key="stop_ram_btn", use_container_width=True):
+                    api_stop_ram_workload(running_ram.get("session_id"))
+                    st.rerun()
+            else:
+                ram_alloc_choice = st.selectbox(
+                    "RAM Allocation Amount (MB)",
+                    options=[128.0, 256.0, 512.0, 768.0],
+                    index=1,
+                    help="Select heap allocation. Must fit inside available memory with safety cushion."
+                )
+                ram_duration = st.selectbox("Duration (seconds)", options=[30, 60, 120, 180], index=1, key="ram_dur_sel")
+
+                if st.button("🚀 Start RAM Load Test", key="start_ram_btn", type="primary", use_container_width=True):
+                    with st.spinner(f"Allocating {ram_alloc_choice} MB heap pages on Alpine-Linux..."):
+                        r_res = api_start_ram_workload(
+                            target_vm=app_vm.get("name", app_vm_name),
+                            allocated_mb=ram_alloc_choice,
+                            duration_sec=ram_duration
+                        )
+                    if r_res.get("success"):
+                        st.success(r_res.get("message", "RAM load started!"))
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {r_res.get('error')}")
+
+    # Tab 2: Database VM Workload
+    with sim_tab2:
+        st.markdown("#### Safe MariaDB Transaction Load for `Alpine-DB` (Database VM)")
+        st.info(
+            "🔒 **Data Isolation Guarantee**: This workload executes queries exclusively against a dedicated transient table "
+            "(`workload_simulation_test`) and rolls back or cleans up transactions. "
+            "Real student, course, enrollment, and application user records are NEVER modified or deleted."
+        )
+
+        running_db = workload_data.get("running_db_session")
+        if running_db:
+            st.success(f"🟢 **Database Workload Active**: ~{running_db.get('intensity_percent')} QPS on MariaDB across {running_db.get('workers')} worker(s)")
+            st.write(f"Started: {running_db.get('started_at', '')[:19]} (Duration: {running_db.get('duration_sec')}s)")
+            if st.button("⏹️ Stop Database Workload", key="stop_db_btn", use_container_width=True):
+                api_stop_db_workload(running_db.get("session_id"))
+                st.rerun()
+        else:
+            d_col1, d_col2 = st.columns(2)
+            with d_col1:
+                db_intensity = st.selectbox(
+                    "Query Intensity",
+                    options=["low", "medium", "high"],
+                    index=1,
+                    help="Low (~10 QPS), Medium (~30 QPS), High (~60 QPS)"
+                )
+                db_workers = st.selectbox("Concurrent DB Workers", options=[1, 2, 3, 4], index=1, key="db_worker_sel")
+            with d_col2:
+                db_duration = st.selectbox("Duration (seconds)", options=[30, 60, 120, 180], index=1, key="db_dur_sel")
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("🚀 Start MariaDB Load Test", key="start_db_btn", type="primary", use_container_width=True):
+                    with st.spinner("Connecting to MariaDB and generating safe queries..."):
+                        d_res = api_start_db_workload(
+                            target_vm=db_vm.get("name", db_vm_name),
+                            intensity=db_intensity,
+                            workers=db_workers,
+                            duration_sec=db_duration
+                        )
+                    if d_res.get("success"):
+                        st.success(d_res.get("message", "Database workload started!"))
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {d_res.get('error')}")
+
+    # Tab 3: Active Sessions Table
+    with sim_tab3:
+        st.markdown("#### Synthetic Workload History (`workload_simulation_sessions`)")
+        recent_sessions = workload_data.get("recent_sessions", [])
+        if recent_sessions:
+            df_sim = pd.DataFrame(recent_sessions)
+            display_sim_cols = [
+                "session_id", "target_vm", "workload_type", "intensity_percent",
+                "allocated_mb", "workers", "duration_sec", "status", "started_at"
+            ]
+            valid_sim_cols = [c for c in display_sim_cols if c in df_sim.columns]
+            st.dataframe(df_sim[valid_sim_cols], use_container_width=True, hide_index=True)
+        else:
+            st.info("No workload simulation sessions recorded yet.")
+
+    st.markdown("---")
+
+    # =============================================================
+    # SECTION D: ALLOCATION RECOMMENDATIONS
+    # =============================================================
+    st.markdown("### 📋 **D. Real-Time Elasticity Recommendations**")
 
     rec_rows = []
     for vm_key, r in recs_map.items():
@@ -268,14 +481,15 @@ def render_dynamic_allocation_page():
     st.markdown("---")
 
     # =============================================================
-    # SECTION D: ADMINISTRATOR CONTROLS
+    # SECTION E: ADMINISTRATOR CONTROLS
     # =============================================================
-    st.markdown("### 🛠️ **D. Administrator Control Panel**")
+    st.markdown("### 🛠️ **E. Administrator Control Panel**")
 
-    ctrl_tab1, ctrl_tab2, ctrl_tab3 = st.tabs([
+    ctrl_tab1, ctrl_tab2, ctrl_tab3, ctrl_tab4 = st.tabs([
         "⚙️ Automation & Safety Mode",
         "🎛️ Manual CPU Allocation",
-        "🎈 Manual RAM Dynamic Ballooning"
+        "🎈 Manual RAM Dynamic Ballooning",
+        "🎯 Safe Baseline Transition"
     ])
 
     # Tab 1: Automation & Emergency Stop
@@ -313,7 +527,7 @@ def render_dynamic_allocation_page():
                 if st.button("🛑 ENGAGE EMERGENCY STOP", use_container_width=True, type="primary"):
                     res = api_emergency_stop("engage")
                     if res.get("success"):
-                        st.warning("Emergency stop engaged! All scaling halted.")
+                        st.warning("Emergency stop engaged! All scaling and load tests halted.")
                         st.rerun()
                     else:
                         st.error(f"Error: {res.get('error')}")
@@ -381,10 +595,10 @@ def render_dynamic_allocation_page():
 
         cur_ram = float(vm_target_ram_data.get("allocated_ram_mb", 1024.0))
         min_r = int(selected_ram_policy.get("min_ram_mb", 1024))
-        max_r = int(selected_ram_policy.get("max_ram_mb", 6144 if is_app_ram_selected else 4096))
+        max_r = int(selected_ram_policy.get("max_ram_mb", 4096))
 
         # Dynamic options within VM policy range
-        ram_options = [r for r in [1024, 1536, 2048, 2560, 3072, 3584, 4096, 4608, 5120, 5632, 6144] if min_r <= r <= max_r]
+        ram_options = [r for r in [1024, 1536, 2048, 2560, 3072, 3584, 4096] if min_r <= r <= max_r]
         closest_ram = min(ram_options, key=lambda x: abs(x - cur_ram))
 
         new_ram = st.select_slider(
@@ -406,16 +620,40 @@ def render_dynamic_allocation_page():
             else:
                 st.error(f"Failed to adjust dynamic memory: {res.get('error')}")
 
+    # Tab 4: Safe Baseline Transition
+    with ctrl_tab4:
+        st.markdown("#### Safe Baseline Policy Transition")
+        st.caption(
+            "Safely transition virtual machines from overprovisioned configurations (e.g. 4 vCPUs / 4096 MB) "
+            "down to the target college project baseline (1 vCPU, 1024 MB RAM) with XenAPI verification."
+        )
+        trans_vm = st.selectbox(
+            "Select VM to Transition",
+            [app_vm.get("name", app_vm_name), db_vm.get("name", db_vm_name)],
+            key="trans_vm_sel"
+        )
+        t_confirm = st.checkbox(f"⚠️ I authorize downsizing '{trans_vm}' to 1 vCPU and 1024 MB RAM baseline.", key="t_confirm_chk")
+        if st.button(f"🎯 Execute Baseline Transition for {trans_vm}", disabled=not t_confirm, type="primary"):
+            with st.spinner(f"Actuating baseline transition for {trans_vm}..."):
+                res = api_transition_to_baseline(trans_vm)
+            if res.get("success"):
+                st.success(res.get("message"))
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Error: {res.get('error', res.get('message'))}")
+
     st.markdown("---")
 
     # =============================================================
-    # SECTION E: PERFORMANCE MONITORING & VISUALIZATION (Section 12)
+    # SECTION F: PERFORMANCE TELEMETRY, TIMELINE & EFFICIENCY ANALYSIS
     # =============================================================
-    st.markdown("### 📊 **E. Performance Telemetry & Allocation Audit Trail**")
+    st.markdown("### 📊 **F. Performance Telemetry, Timeline & Efficiency Analysis**")
 
-    v_tab1, v_tab2, v_tab3 = st.tabs([
+    v_tab1, v_tab2, v_tab3, v_tab4 = st.tabs([
         "📜 Resource Allocation Audit History",
         "📈 Telemetry Trends (CPU & RAM)",
+        "⏱️ Scaling Event Timeline",
         "🔬 Static vs. Dynamic Allocation Efficiency"
     ])
 
@@ -454,18 +692,56 @@ def render_dynamic_allocation_page():
                     st.markdown("###### RAM Utilization (%)")
                     chart_ram = df_trend.pivot_table(index="timestamp", columns="vm_name", values="ram_percent")
                     st.line_chart(chart_ram, height=260)
+
+                c_plot3, c_plot4 = st.columns(2)
+                with c_plot3:
+                    st.markdown("###### vCPU Allocation (Online Cores)")
+                    if "vcpu_count" in df_trend.columns:
+                        chart_vcpus = df_trend.pivot_table(index="timestamp", columns="vm_name", values="vcpu_count")
+                        st.line_chart(chart_vcpus, height=260)
+                with c_plot4:
+                    st.markdown("###### Dynamic RAM Allocation (MB)")
+                    if "allocated_ram_mb" in df_trend.columns:
+                        chart_alloc_ram = df_trend.pivot_table(index="timestamp", columns="vm_name", values="allocated_ram_mb")
+                        st.line_chart(chart_alloc_ram, height=260)
         else:
             st.caption("Telemetry history is loading from MariaDB/SQLite...")
 
     with v_tab3:
+        st.markdown("##### Resource Allocation Event Timeline")
+        if history_records:
+            st.caption("Observed scaling events chronologically ordered:")
+            for item in history_records[:10]:
+                t_str = str(item.get("created_at", ""))[:19]
+                vm = item.get("vm_name", "")
+                res_t = item.get("resource_type", "").upper()
+                p_val = item.get("previous_value", "")
+                a_val = item.get("actual_value", "")
+                reason = item.get("trigger_reason", "")
+                status = item.get("execution_status", "")
+
+                icon = "🟢" if status.lower() == "success" else "🔴"
+                st.markdown(
+                    f"""
+                    <div style="border-left: 3px solid #3B82F6; padding-left: 12px; margin-bottom: 8px;">
+                        <b>{t_str}</b> — {icon} <b>{vm}</b> {res_t} scaled from <code>{p_val}</code> to <code>{a_val}</code><br/>
+                        <small style="color:#64748B;">Trigger: {reason}</small>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info("No scaling events recorded yet. Run a workload test or adjust resources to generate timeline events.")
+
+    with v_tab4:
         st.markdown("##### Static Overprovisioning vs. Dynamic Resource Elasticity")
         st.markdown(
             """
             In traditional static virtualization, virtual machines must be provisioned for theoretical peak capacity
-            (e.g., 4 vCPUs and 4096-6144 MB RAM per VM). This results in massive hypervisor resource waste during off-peak hours.
+            (e.g., 4 vCPUs and 4096 MB RAM per VM). This results in massive hypervisor resource waste during off-peak hours.
 
             **Xen Dynamic Resource Allocation Advantages:**
-            - **vCPU Elasticity:** Cores are hot-plugged on demand (>80% utilization) and reclaimed (<25%) when idle.
+            - **vCPU Elasticity:** Cores are hot-plugged on demand (>80% utilization for 3 intervals) and reclaimed (<25% for 6 intervals) when idle.
             - **Memory Ballooning:** Dynamic ranges (`dynamic_min` to `dynamic_max`) allow the Xen hypervisor to pool free RAM and grant memory to workloads under pressure without rebooting.
             - **Energy & Density Efficiency:** Up to **3.2x higher VM density** on the same physical XCP-ng server.
             """
@@ -473,8 +749,8 @@ def render_dynamic_allocation_page():
 
         comp_data = {
             "Metric / Architecture": ["Allocated vCPUs (Average)", "Allocated RAM (Average)", "Hypervisor Headroom", "Responsiveness to Load Spikes", "Downtime Required"],
-            "Static Overprovisioning": ["4 vCPUs (Locked)", "4096-6144 MB (Locked)", "Exhausted (Low VM density)", "None (Rigid)", "Reboot required to resize"],
-            "Dynamic Xen Elasticity (Phase 3)": ["1-2 vCPUs (Elastic)", "2048-4096 MB (Ballooned)", "High (Reclaimed for other VMs)", "Autonomous Scale-Up in <5s", "Zero Downtime (Live XenAPI)"]
+            "Static Overprovisioning": ["4 vCPUs (Locked)", "4096 MB (Locked)", "Exhausted (Low VM density)", "None (Rigid)", "Reboot required to resize"],
+            "Dynamic Xen Elasticity (Phase 3)": ["1-2 vCPUs (Elastic)", "1024-2048 MB (Ballooned)", "High (Reclaimed for other VMs)", "Autonomous Scale-Up in <5s", "Zero Downtime (Live XenAPI)"]
         }
         st.table(pd.DataFrame(comp_data))
 

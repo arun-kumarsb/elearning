@@ -217,4 +217,55 @@ def api_apply_manual_ram(vm_name: str, ram_mb: float, reason: str = "Administrat
 def api_apply_recommended(vm_name: str) -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/apply-recommended", {"vm_name": vm_name})
 
+def api_transition_to_baseline(vm_name: str) -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/transition-baseline", {"vm_name": vm_name})
+
+# -------------------------------------------------------------
+# Workload Simulator API Endpoints
+# -------------------------------------------------------------
+def api_get_workload_status() -> Dict[str, Any]:
+    return safe_request("GET", "xen/workload/status")
+
+def api_start_cpu_workload(target_vm: str = "Alpine-Linux", intensity_percent: float = 75.0,
+                           workers: int = 2, duration_sec: int = 60) -> Dict[str, Any]:
+    return safe_request("POST", "xen/workload/cpu/start", {
+        "target_vm": target_vm,
+        "intensity_percent": intensity_percent,
+        "workers": workers,
+        "duration_sec": duration_sec
+    })
+
+def api_stop_cpu_workload(session_id: Optional[str] = None) -> Dict[str, Any]:
+    payload = {"session_id": session_id} if session_id else {}
+    return safe_request("POST", "xen/workload/cpu/stop", payload)
+
+def api_start_ram_workload(target_vm: str = "Alpine-Linux", allocated_mb: float = 256.0,
+                           duration_sec: int = 60) -> Dict[str, Any]:
+    return safe_request("POST", "xen/workload/ram/start", {
+        "target_vm": target_vm,
+        "allocated_mb": allocated_mb,
+        "duration_sec": duration_sec
+    })
+
+def api_stop_ram_workload(session_id: Optional[str] = None) -> Dict[str, Any]:
+    payload = {"session_id": session_id} if session_id else {}
+    return safe_request("POST", "xen/workload/ram/stop", payload)
+
+def api_start_db_workload(target_vm: str = "Alpine-DB", intensity: str = "medium",
+                          workers: int = 2, duration_sec: int = 60) -> Dict[str, Any]:
+    return safe_request("POST", "xen/workload/db/start", {
+        "target_vm": target_vm,
+        "intensity": intensity,
+        "workers": workers,
+        "duration_sec": duration_sec
+    })
+
+def api_stop_db_workload(session_id: Optional[str] = None) -> Dict[str, Any]:
+    payload = {"session_id": session_id} if session_id else {}
+    return safe_request("POST", "xen/workload/db/stop", payload)
+
+def api_workload_emergency_stop() -> Dict[str, Any]:
+    return safe_request("POST", "xen/workload/emergency-stop")
+
+
 

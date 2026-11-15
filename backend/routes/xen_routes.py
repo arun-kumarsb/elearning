@@ -17,7 +17,14 @@ from backend.services.xen_service import (
     set_emergency_stop_status,
     apply_manual_cpu_allocation,
     apply_manual_ram_allocation,
-    apply_pending_recommendation
+    apply_pending_recommendation,
+    transition_vm_to_baseline,
+    get_workload_simulator_status,
+    start_cpu_workload_service,
+    start_ram_workload_service,
+    start_database_workload_service,
+    stop_workload_service,
+    stop_all_workloads_service
 )
 
 xen_bp = Blueprint("xen", __name__, url_prefix="/api/xen")
@@ -371,3 +378,209 @@ def xen_allocation_apply_recommended():
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/transition-baseline", methods=["POST"])
+@admin_required
+def xen_allocation_transition_baseline():
+    """
+    POST /api/xen/allocation/transition-baseline
+    Admin approved transition of a VM to baseline policy (1 vCPU, 1024 MB RAM).
+    Request JSON: { "vm_name": "Alpine-Linux" }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        result = transition_vm_to_baseline(vm_name, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# -------------------------------------------------------------
+# Workload Simulator Endpoints
+# -------------------------------------------------------------
+@xen_bp.route("/workload/status", methods=["GET"])
+def xen_workload_status():
+    """
+    GET /api/xen/workload/status
+    Returns status of active synthetic workload tests and available guest memory.
+    """
+    try:
+        status = get_workload_simulator_status()
+        return jsonify({"success": True, "data": status}), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/cpu/start", methods=["POST"])
+@admin_required
+def xen_workload_cpu_start():
+    """
+    POST /api/xen/workload/cpu/start
+    Start CPU workload generation.
+    Request JSON: { "target_vm": "Alpine-Linux", "intensity_percent": 75, "workers": 2, "duration_sec": 60 }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        target_vm = data.get("target_vm", "Alpine-Linux")
+        intensity = float(data.get("intensity_percent", 75.0))
+        workers = int(data.get("workers", 2))
+        duration = int(data.get("duration_sec", 60))
+        initiated_by = request.user.get("email", "admin")
+
+        result = start_cpu_workload_service(
+            target_vm=target_vm,
+            intensity_percent=intensity,
+            workers=workers,
+            duration_sec=duration,
+            initiated_by=initiated_by
+        )
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/cpu/stop", methods=["POST"])
+@admin_required
+def xen_workload_cpu_stop():
+    """
+    POST /api/xen/workload/cpu/stop
+    Stop active CPU workload test.
+    Request JSON: { "session_id": "..." } (optional, stops running CPU test if omitted)
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not session_id:
+            # Find running CPU session
+            status = get_workload_simulator_status()
+            running = status.get("running_cpu_session")
+            if running:
+                session_id = running.get("session_id")
+
+        if not session_id:
+            return jsonify({"success": False, "error": "No running CPU workload session found."}), 404
+
+        result = stop_workload_service(session_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/ram/start", methods=["POST"])
+@admin_required
+def xen_workload_ram_start():
+    """
+    POST /api/xen/workload/ram/start
+    Start RAM allocation workload with OOM safety check.
+    Request JSON: { "target_vm": "Alpine-Linux", "allocated_mb": 256, "duration_sec": 60 }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        target_vm = data.get("target_vm", "Alpine-Linux")
+        allocated_mb = float(data.get("allocated_mb", 256.0))
+        duration = int(data.get("duration_sec", 60))
+        initiated_by = request.user.get("email", "admin")
+
+        result = start_ram_workload_service(
+            target_vm=target_vm,
+            allocated_mb=allocated_mb,
+            duration_sec=duration,
+            initiated_by=initiated_by
+        )
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/ram/stop", methods=["POST"])
+@admin_required
+def xen_workload_ram_stop():
+    """
+    POST /api/xen/workload/ram/stop
+    Stop active RAM allocation workload.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not session_id:
+            status = get_workload_simulator_status()
+            running = status.get("running_ram_session")
+            if running:
+                session_id = running.get("session_id")
+
+        if not session_id:
+            return jsonify({"success": False, "error": "No running RAM workload session found."}), 404
+
+        result = stop_workload_service(session_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/db/start", methods=["POST"])
+@admin_required
+def xen_workload_db_start():
+    """
+    POST /api/xen/workload/db/start
+    Start safe MariaDB transaction workload.
+    Request JSON: { "target_vm": "Alpine-DB", "intensity": "medium", "workers": 2, "duration_sec": 60 }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        target_vm = data.get("target_vm", "Alpine-DB")
+        intensity = str(data.get("intensity", "medium"))
+        workers = int(data.get("workers", 2))
+        duration = int(data.get("duration_sec", 60))
+        initiated_by = request.user.get("email", "admin")
+
+        result = start_database_workload_service(
+            target_vm=target_vm,
+            intensity=intensity,
+            workers=workers,
+            duration_sec=duration,
+            initiated_by=initiated_by
+        )
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/db/stop", methods=["POST"])
+@admin_required
+def xen_workload_db_stop():
+    """
+    POST /api/xen/workload/db/stop
+    Stop active Database workload test.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not session_id:
+            status = get_workload_simulator_status()
+            running = status.get("running_db_session")
+            if running:
+                session_id = running.get("session_id")
+
+        if not session_id:
+            return jsonify({"success": False, "error": "No running Database workload session found."}), 404
+
+        result = stop_workload_service(session_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/workload/emergency-stop", methods=["POST"])
+@admin_required
+def xen_workload_emergency_stop():
+    """
+    POST /api/xen/workload/emergency-stop
+    Immediate Emergency Stop for all active workload generators.
+    """
+    try:
+        result = stop_all_workloads_service()
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
