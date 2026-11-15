@@ -169,11 +169,26 @@ def api_get_xen_vm_metrics(vm_id: str) -> Dict[str, Any]:
 def api_get_xen_monitor_status() -> Dict[str, Any]:
     return safe_request("GET", "xen/monitor/status")
 
-def api_get_xen_history(vm_name: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+def api_get_metrics_history(vm_name: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    """
+    Retrieve historical VM telemetry records from Flask backend.
+    Calls GET /api/xen/history?limit=... (or /api/xen/metrics/history).
+    Returns a standardized dictionary with {"success": True/False, "count": int, "data": List[Dict]}.
+    Never fabricates telemetry; returns empty history data if no records exist.
+    """
     endpoint = f"xen/history?limit={limit}"
     if vm_name:
         endpoint += f"&vm_name={vm_name}"
-    return safe_request("GET", endpoint)
+    res = safe_request("GET", endpoint)
+    if not isinstance(res, dict):
+        return {"success": False, "count": 0, "data": [], "error": "Invalid response format from API"}
+    if "data" not in res:
+        res["data"] = []
+    if "count" not in res:
+        res["count"] = len(res["data"])
+    return res
+
+api_get_xen_history = api_get_metrics_history  # Alias for backward compatibility
 
 def api_get_health() -> Dict[str, Any]:
     return safe_request("GET", "health")
@@ -197,6 +212,20 @@ def api_enable_allocation() -> Dict[str, Any]:
 def api_disable_allocation() -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/disable")
 
+def api_set_allocation_mode(mode: str) -> Dict[str, Any]:
+    """
+    Set dynamic allocation engine mode: 'auto' or 'manual'.
+    Calls POST /api/xen/allocation/mode with fallback to enable/disable.
+    """
+    clean_mode = str(mode).strip().lower()
+    res = safe_request("POST", "xen/allocation/mode", {"mode": clean_mode})
+    if not res.get("success") and res.get("status_code") == 404:
+        if clean_mode == "auto":
+            return api_enable_allocation()
+        else:
+            return api_disable_allocation()
+    return res
+
 def api_emergency_stop(action: str = "engage") -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/emergency-stop", {"action": action})
 
@@ -214,8 +243,11 @@ def api_apply_manual_ram(vm_name: str, ram_mb: float, reason: str = "Administrat
         "reason": reason
     })
 
-def api_apply_recommended(vm_name: str) -> Dict[str, Any]:
+def api_apply_recommendation(vm_name: str) -> Dict[str, Any]:
+    """Apply pending scaling recommendation for a specific VM."""
     return safe_request("POST", "xen/allocation/apply-recommended", {"vm_name": vm_name})
+
+api_apply_recommended = api_apply_recommendation  # Alias for backward compatibility
 
 def api_transition_to_baseline(vm_name: str) -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/transition-baseline", {"vm_name": vm_name})

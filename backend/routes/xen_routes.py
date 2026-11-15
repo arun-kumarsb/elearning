@@ -163,10 +163,13 @@ def xen_monitor_status():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @xen_bp.route("/history", methods=["GET"])
+@xen_bp.route("/metrics/history", methods=["GET"])
 def xen_history():
     """
     GET /api/xen/history?limit=50&vm_name=...
+    GET /api/xen/metrics/history?limit=50&vm_name=...
     Returns historical telemetry records from the database for time-series charting.
+    Never fabricates telemetry; returns empty data if none exist.
     """
     try:
         vm_name = request.args.get("vm_name")
@@ -280,6 +283,37 @@ def xen_allocation_disable():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@xen_bp.route("/allocation/mode", methods=["POST"])
+@admin_required
+def xen_allocation_set_mode():
+    """
+    POST /api/xen/allocation/mode
+    Switches dynamic resource allocation mode ('auto' or 'manual').
+    Request JSON: { "mode": "auto" } or { "mode": "manual" }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        requested_mode = str(data.get("mode", "manual")).lower().strip()
+        if requested_mode not in ("auto", "manual"):
+            return jsonify({
+                "success": False,
+                "error": f"Invalid mode '{requested_mode}'. Supported modes: 'auto', 'manual'"
+            }), 400
+
+        mode = set_automation_mode(requested_mode)
+        message = (
+            "Automated dynamic resource allocation enabled."
+            if mode == "auto"
+            else "Automated dynamic resource allocation disabled. Manual mode active."
+        )
+        return jsonify({
+            "success": True,
+            "message": message,
+            "mode": mode
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @xen_bp.route("/allocation/emergency-stop", methods=["POST"])
 @admin_required
 def xen_allocation_emergency_stop():
@@ -364,6 +398,7 @@ def xen_allocation_ram():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @xen_bp.route("/allocation/apply-recommended", methods=["POST"])
+@xen_bp.route("/allocation/apply-recommendation", methods=["POST"])
 @admin_required
 def xen_allocation_apply_recommended():
     """

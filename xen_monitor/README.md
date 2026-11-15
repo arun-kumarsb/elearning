@@ -203,9 +203,9 @@ python3 xen_monitor/resource_monitor.py
 
 ## 7. Automated Testing & Verification
 
-Run the full suite of 84 unit and integration tests across monitoring, allocation, workload simulation, and student load orchestration:
+Run the full suite of 86 unit and integration tests across monitoring, allocation, workload simulation, and student load orchestration:
 
 ```bash
 python3 -m unittest discover tests
 ```
-*Result: 84/84 tests passing with 100% success rate.*
+*Result: 86/86 tests passing with 100% success rate.*

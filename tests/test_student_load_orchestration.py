@@ -460,5 +460,59 @@ class TestStudentLoadOrchestration(unittest.TestCase):
                 self.assertEqual(res["target_baseline"]["vcpus"], 1)
                 self.assertEqual(res["target_baseline"]["ram_mb"], 1024.0)
 
+    # -------------------------------------------------------------------------
+    # Scenario 21: Frontend API Contracts & Imports
+    # -------------------------------------------------------------------------
+    def test_21_frontend_api_contracts_and_imports(self):
+        """Verify all frontend API contracts imported by Intelligent Orchestration exist and are callable."""
+        import frontend.api as fapi
+        import frontend.pages.intelligent_orchestration as fpage
+        
+        self.assertTrue(callable(getattr(fapi, "api_get_metrics_history", None)))
+        self.assertTrue(callable(getattr(fapi, "api_set_allocation_mode", None)))
+        self.assertTrue(callable(getattr(fapi, "api_apply_recommendation", None)))
+        self.assertTrue(callable(getattr(fapi, "api_apply_recommended", None)))
+        self.assertTrue(callable(getattr(fapi, "api_get_xen_history", None)))
+        self.assertTrue(callable(getattr(fpage, "render_intelligent_orchestration_page", None)))
+
+        with patch.object(fapi, "safe_request", return_value={"success": True, "count": 0, "data": []}) as mock_req:
+            res = fapi.api_get_metrics_history(limit=50)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["data"], [])
+            mock_req.assert_called_with("GET", "xen/history?limit=50")
+
+        with patch.object(fapi, "safe_request", return_value={"success": True, "mode": "auto"}) as mock_req:
+            res = fapi.api_set_allocation_mode("auto")
+            self.assertTrue(res["success"])
+            self.assertEqual(res["mode"], "auto")
+
+    # -------------------------------------------------------------------------
+    # Scenario 22: Metrics History & Allocation Mode Endpoints
+    # -------------------------------------------------------------------------
+    def test_22_metrics_history_and_mode_endpoints(self):
+        """Verify GET /api/xen/metrics/history and POST /api/xen/allocation/mode endpoints."""
+        app = create_app()
+        client = app.test_client()
+        admin_token = generate_session_token(1, "admin@elearning.local", "admin")
+        headers = {"Authorization": f"Bearer {admin_token}", "Content-Type": "application/json"}
+
+        # 1. Test GET /api/xen/metrics/history
+        resp = client.get("/api/xen/metrics/history?limit=10")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertIsInstance(data.get("data"), list)
+
+        # 2. Test POST /api/xen/allocation/mode
+        resp_mode = client.post("/api/xen/allocation/mode", headers=headers, json={"mode": "auto"})
+        self.assertEqual(resp_mode.status_code, 200)
+        data_mode = resp_mode.get_json()
+        self.assertTrue(data_mode.get("success"))
+        self.assertEqual(data_mode.get("mode"), "auto")
+
+        # 3. Test invalid mode rejection
+        resp_invalid = client.post("/api/xen/allocation/mode", headers=headers, json={"mode": "turbo"})
+        self.assertEqual(resp_invalid.status_code, 400)
+
 if __name__ == "__main__":
     unittest.main()
