@@ -342,6 +342,14 @@ def api_stop_student_load(session_id: Optional[str] = None) -> Dict[str, Any]:
 def api_emergency_stop_student_load() -> Dict[str, Any]:
     return safe_request("POST", "xen/student-load/emergency-stop")
 
+def api_student_load_preflight() -> Dict[str, Any]:
+    """Run preflight authentication check for synthetic student accounts."""
+    return safe_request("POST", "xen/student-load/preflight")
+
+def api_execute_baseline_maintenance(vm_name: str) -> Dict[str, Any]:
+    """Execute administrator-approved controlled baseline maintenance procedure."""
+    return safe_request("POST", "xen/vm/baseline-maintenance", {"vm_name": vm_name})
+
 
 
 

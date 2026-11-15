@@ -54,6 +54,15 @@ def create_app():
     app.register_blueprint(xen_bp)
     app.register_blueprint(health_bp)
 
+    # Idempotently ensure database schema and dedicated synthetic student pool
+    with app.app_context():
+        try:
+            ensure_schema()
+            from backend.database import ensure_simulated_student_pool
+            ensure_simulated_student_pool(200)
+        except Exception as e:
+            logger.warning(f"Database schema/pool initialization notice: {e}")
+
     @app.route("/", methods=["GET"])
     def index():
         return jsonify({

@@ -3,6 +3,9 @@ import time
 import socket
 import logging
 import sqlite3
+import collections
+import threading
+from typing import Dict, Any, List, Optional
 from contextlib import contextmanager
 from backend.config import Config
 
@@ -11,6 +14,38 @@ logger = logging.getLogger(__name__)
 # Track active database mode
 ACTIVE_DB_MODE = None
 LOCAL_SQLITE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database", "elearning_local.db")
+
+# Instrumentation for True Database Query Rate (QPS)
+_db_metrics_lock = threading.Lock()
+_total_queries_count = 0
+_recent_query_timestamps = collections.deque(maxlen=2000)
+
+def record_db_query_execution():
+    """Atomically record database query execution for true QPS instrumentation."""
+    global _total_queries_count
+    with _db_metrics_lock:
+        _total_queries_count += 1
+        _recent_query_timestamps.append(time.time())
+
+def get_db_query_metrics() -> Dict[str, Any]:
+    """Calculate and return actual database query rate (QPS) and total queries."""
+    now = time.time()
+    window_sec = 2.0
+    cutoff = now - window_sec
+    with _db_metrics_lock:
+        while _recent_query_timestamps and _recent_query_timestamps[0] < cutoff:
+            _recent_query_timestamps.popleft()
+        recent_cnt = len(_recent_query_timestamps)
+        total = _total_queries_count
+
+    qps = round(recent_cnt / window_sec, 2)
+    return {
+        "queries_per_sec": qps,
+        "total_queries": total,
+        "window_sec": window_sec,
+        "active_db_mode": ACTIVE_DB_MODE or ("mariadb" if is_mariadb_reachable() else "sqlite"),
+        "is_mariadb": is_mariadb_reachable()
+    }
 
 _last_mariadb_check_time = 0.0
 _last_mariadb_status = False
@@ -225,51 +260,66 @@ def ensure_simulated_student_pool(target_count: int = 200) -> int:
     strictly under '@elearning.test' domain. Never touches or conflicts with real users.
     Returns the count of verified simulated student accounts.
     """
+    global ACTIVE_DB_MODE
     try:
-        # Check existing count
+        # Initialize connection mode if not set
+        if ACTIVE_DB_MODE is None:
+            conn = get_connection()
+            conn.close()
+
+        # Check and seed sample courses if missing
+        c_rows = query_db("SELECT COUNT(*) as cnt FROM courses")
+        c_cnt = c_rows[0]["cnt"] if c_rows else 0
+        if c_cnt == 0:
+            sample_courses = [
+                ("CS-101", "Introduction to E-Learning & Cloud", "Virtual learning environments and scalable architectures."),
+                ("CS-201", "Data Structures & Scalability", "Core algorithms and distributed system design."),
+                ("CS-301", "Cloud Virtualization with Xen", "Hypervisors, memory ballooning, and dynamic elasticity."),
+                ("CS-401", "High-Performance MariaDB Architectures", "Relational database clustering and query optimization.")
+            ]
+            for code, title, desc in sample_courses:
+                if ACTIVE_DB_MODE == "mariadb":
+                    execute_db("INSERT IGNORE INTO courses (course_code, title, description) VALUES (%s, %s, %s)", (code, title, desc))
+                else:
+                    execute_db("INSERT OR IGNORE INTO courses (course_code, title, description) VALUES (?, ?, ?)", (code, title, desc))
+
+        # Check existing simulated student count
         existing = query_db("SELECT COUNT(*) as cnt FROM users WHERE email LIKE '%@elearning.test'")
         current_cnt = existing[0]["cnt"] if existing else 0
 
         # Update password hash for existing pool to ensure authentic authentication succeeds
         if current_cnt > 0:
-            execute_db(
-                "UPDATE users SET password_hash = %s WHERE email LIKE '%@elearning.test'"
-                if ACTIVE_DB_MODE == "mariadb"
-                else "UPDATE users SET password_hash = ? WHERE email LIKE '%@elearning.test'",
-                (SIMULATED_STUDENT_PASSWORD_HASH,)
-            )
+            if ACTIVE_DB_MODE == "mariadb":
+                execute_db("UPDATE users SET password_hash = %s WHERE email LIKE '%@elearning.test'", (SIMULATED_STUDENT_PASSWORD_HASH,))
+            else:
+                execute_db("UPDATE users SET password_hash = ? WHERE email LIKE '%@elearning.test'", (SIMULATED_STUDENT_PASSWORD_HASH,))
 
         if current_cnt >= target_count:
             return current_cnt
 
         logger.info(f"Seeding dedicated simulated student pool: {current_cnt} -> {target_count}...")
-        for i in range(current_cnt + 1, target_count + 1):
-            email = f"sim_student_{i}@elearning.test"
-            name = f"Simulated Student #{i}"
-            
-            # Insert student
-            execute_db(
-                "INSERT INTO students (name, email) VALUES (%s, %s) ON DUPLICATE KEY UPDATE name=name" 
-                if ACTIVE_DB_MODE == "mariadb" 
-                else "INSERT OR IGNORE INTO students (name, email) VALUES (?, ?)",
-                (name, email)
-            )
-            
-            # Fetch student ID
-            st_row = query_db(
-                "SELECT id FROM students WHERE email = %s" if ACTIVE_DB_MODE == "mariadb" else "SELECT id FROM students WHERE email = ?",
-                (email,)
-            )
-            s_id = st_row[0]["id"] if st_row else None
-            
-            # Insert user
-            execute_db(
-                "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, 'student', %s) ON DUPLICATE KEY UPDATE password_hash=%s, role='student'"
-                if ACTIVE_DB_MODE == "mariadb"
-                else "INSERT OR IGNORE INTO users (email, password_hash, role, student_id) VALUES (?, ?, 'student', ?)",
-                (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id, SIMULATED_STUDENT_PASSWORD_HASH) if ACTIVE_DB_MODE == "mariadb"
-                else (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
-            )
+        with get_db_cursor(commit=True) as cur:
+            for i in range(current_cnt + 1, target_count + 1):
+                email = f"sim_student_{i}@elearning.test"
+                name = f"Simulated Student #{i}"
+                if ACTIVE_DB_MODE == "mariadb":
+                    cur.execute("INSERT IGNORE INTO students (name, email) VALUES (%s, %s)", (name, email))
+                    cur.execute("SELECT id FROM students WHERE email = %s", (email,))
+                    row = cur.fetchone()
+                    s_id = row["id"] if isinstance(row, dict) else (row[0] if row else None)
+                    cur.execute(
+                        "INSERT IGNORE INTO users (email, password_hash, role, student_id) VALUES (%s, %s, 'student', %s)",
+                        (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
+                    )
+                else:
+                    cur.execute("INSERT OR IGNORE INTO students (name, email) VALUES (?, ?)", (name, email))
+                    cur.execute("SELECT id FROM students WHERE email = ?", (email,))
+                    row = cur.fetchone()
+                    s_id = row["id"] if isinstance(row, dict) or hasattr(row, "__getitem__") else None
+                    cur.execute(
+                        "INSERT OR IGNORE INTO users (email, password_hash, role, student_id) VALUES (?, ?, 'student', ?)",
+                        (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
+                    )
         return target_count
     except Exception as e:
         logger.warning(f"Error ensuring simulated student pool: {e}")
@@ -331,6 +381,7 @@ def _adapt_query(query: str) -> str:
 def query_db(query, args=(), one=False):
     """Execute a read query and return dictionary result(s)."""
     global ACTIVE_DB_MODE
+    record_db_query_execution()
     with get_db_cursor(commit=False) as cursor:
         sql = _adapt_query(query)
         cursor.execute(sql, args)
@@ -343,6 +394,7 @@ def query_db(query, args=(), one=False):
 def execute_db(query, args=(), return_last_id=False):
     """Execute an INSERT, UPDATE, or DELETE query and return affected rows or last insert ID."""
     global ACTIVE_DB_MODE
+    record_db_query_execution()
     with get_db_cursor(commit=True) as cursor:
         sql = _adapt_query(query)
         affected = cursor.execute(sql, args)

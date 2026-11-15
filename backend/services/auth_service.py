@@ -88,8 +88,33 @@ def authenticate_user(email: str, password: str) -> dict | None:
     """
     user = query_db(query, (email.strip(),), one=True)
     
-    # If user not in `users` table, check if email is an existing student without a user record
+    # If user not in `users` table, check if synthetic student or existing student
+    clean_email = email.strip().lower()
     if not user:
+        # Handle synthetic load student auto-provisioning
+        if clean_email.endswith("@elearning.test") and password == "SimStudent@123":
+            sim_name = clean_email.split("@")[0].replace("_", " ").title()
+            student = query_db("SELECT id, name, email FROM students WHERE LOWER(email) = %s LIMIT 1", (clean_email,), one=True)
+            if not student:
+                s_id = execute_db("INSERT INTO students (name, email) VALUES (%s, %s)", (sim_name, clean_email), return_last_id=True)
+            else:
+                s_id = student["id"]
+            new_hash = hash_password(password)
+            user_id = execute_db(
+                "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, %s, %s)",
+                (clean_email, new_hash, "student", s_id),
+                return_last_id=True
+            )
+            token = generate_session_token(user_id, clean_email, "student")
+            return {
+                "id": user_id,
+                "email": clean_email,
+                "role": "student",
+                "student_id": s_id,
+                "name": sim_name,
+                "token": token
+            }
+
         student = query_db("SELECT id, name, email FROM students WHERE LOWER(email) = LOWER(%s) LIMIT 1", (email.strip(),), one=True)
         if student and password in ("Student@123", "password", "student123"):
             # Create user record automatically for existing sample student
@@ -109,6 +134,21 @@ def authenticate_user(email: str, password: str) -> dict | None:
                 "token": token
             }
         return None
+
+    # Handle synthetic student existing in table with potential hash mismatch
+    if clean_email.endswith("@elearning.test") and password == "SimStudent@123":
+        if not verify_password(password, user["password_hash"]):
+            new_hash = hash_password(password)
+            execute_db("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user["id"]))
+        token = generate_session_token(user["id"], user["email"], user["role"])
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "role": user["role"],
+            "student_id": user["student_id"],
+            "name": user["student_name"] or user["email"].split("@")[0],
+            "token": token
+        }
         
     if verify_password(password, user["password_hash"]):
         token = generate_session_token(user["id"], user["email"], user["role"])

@@ -207,6 +207,11 @@ def transition_vm_to_baseline(vm_name: str, initiated_by: str = "admin") -> Dict
     monitor = get_monitor_instance()
     return monitor.transition_to_baseline(vm_name, initiated_by=initiated_by)
 
+def execute_baseline_maintenance_service(vm_name: str, initiated_by: str = "admin") -> Dict[str, Any]:
+    """Execute controlled administrator-approved baseline maintenance procedure."""
+    monitor = get_monitor_instance()
+    return monitor.execute_baseline_maintenance(vm_name, initiated_by=initiated_by)
+
 # -------------------------------------------------------------
 # Workload Simulator Service Functions
 # -------------------------------------------------------------
@@ -298,6 +303,11 @@ def emergency_stop_student_load_service() -> Dict[str, Any]:
     """Emergency stop all student traffic generators and scaling."""
     from backend.services.student_load_service import StudentLoadSimulatorService
     return StudentLoadSimulatorService.get_instance().emergency_stop_all()
+
+def run_student_load_preflight() -> Dict[str, Any]:
+    """Run authentication and connectivity preflight verification."""
+    from backend.services.student_load_service import StudentLoadSimulatorService
+    return StudentLoadSimulatorService.get_instance().run_preflight_check()
 
 def execute_simulated_student_db_query(session_id: str, student_id: int) -> Dict[str, Any]:
     """

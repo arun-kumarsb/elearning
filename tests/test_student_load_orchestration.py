@@ -79,6 +79,14 @@ class TestStudentLoadOrchestration(unittest.TestCase):
         # Pre-seed simulated student accounts
         ensure_simulated_student_pool(20)
 
+        # Reset any lingering emergency stop or load test sessions
+        mon = XenResourceMonitor.get_instance()
+        if hasattr(mon, "allocation_engine"):
+            mon.allocation_engine.set_emergency_stop(False)
+        svc = StudentLoadSimulatorService.get_instance()
+        svc.stop_load_test()
+        svc.current_session = None
+
     def tearDown(self):
         """Clean up test fixtures and reset state."""
         try:
@@ -772,6 +780,76 @@ class TestStudentLoadOrchestration(unittest.TestCase):
         self.assertGreaterEqual(len(status["recent_errors"]), 4)
 
         svc.stop_load_test()
+
+    # -------------------------------------------------------------------------
+    # Scenario 31: Student Load Preflight Verification
+    # -------------------------------------------------------------------------
+    def test_31_student_load_preflight_verification(self):
+        """Verify preflight authentication check validates credentials and courses API."""
+        svc = StudentLoadSimulatorService.get_instance()
+        pf_res = svc.run_preflight_check()
+        self.assertTrue(pf_res["success"])
+        self.assertTrue(pf_res.get("token_received"))
+
+        # Test endpoint /api/xen/student-load/preflight
+        res = self.client.post("/api/xen/student-load/preflight")
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data.get("success"))
+
+    # -------------------------------------------------------------------------
+    # Scenario 32: Database Query Rate Metrics Tracking
+    # -------------------------------------------------------------------------
+    def test_32_database_query_rate_metrics(self):
+        """Verify atomic database query tracking and QPS calculation."""
+        from backend.database import get_db_query_metrics, query_db
+        m1 = get_db_query_metrics()
+        initial_queries = m1["total_queries"]
+
+        # Run test queries
+        for _ in range(5):
+            query_db("SELECT 1")
+
+        m2 = get_db_query_metrics()
+        self.assertEqual(m2["total_queries"], initial_queries + 5)
+        self.assertGreater(m2["queries_per_sec"], 0.0)
+
+    # -------------------------------------------------------------------------
+    # Scenario 33: Baseline Maintenance Procedure Actuation
+    # -------------------------------------------------------------------------
+    def test_33_baseline_maintenance_procedure(self):
+        """Verify controlled baseline maintenance execution via XenAPI."""
+        with patch.object(self.monitor.client, "execute_baseline_maintenance") as mock_maint:
+            mock_maint.return_value = {
+                "success": True,
+                "status": "SUCCESS",
+                "vm_name": "Alpine-Linux",
+                "actual_value": "1 vCPU / 1024.0 MB",
+                "startup_vcpus": 1,
+                "online_vcpus": 1
+            }
+            res = self.monitor.execute_baseline_maintenance("Alpine-Linux", initiated_by="admin")
+            self.assertTrue(res["success"])
+            self.assertEqual(res["startup_vcpus"], 1)
+
+        # Test API endpoint
+        with patch("backend.routes.xen_routes.execute_baseline_maintenance_service") as mock_svc:
+            mock_svc.return_value = {
+                "success": True,
+                "status": "SUCCESS",
+                "vm_name": "Alpine-Linux",
+                "actual_value": "1 vCPU / 1024.0 MB",
+                "startup_vcpus": 1,
+                "online_vcpus": 1
+            }
+            api_res = self.client.post(
+                "/api/xen/vm/baseline-maintenance",
+                headers=self.admin_headers,
+                json={"vm_name": "Alpine-Linux"}
+            )
+            self.assertEqual(api_res.status_code, 200)
+            data = api_res.get_json()
+            self.assertTrue(data.get("success"))
 
 if __name__ == "__main__":
     unittest.main()

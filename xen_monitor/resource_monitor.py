@@ -654,6 +654,54 @@ class XenResourceMonitor:
                 "message": msg
             }
 
+    def execute_baseline_maintenance(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
+        """
+        Execute administrator-approved controlled baseline maintenance procedure:
+        clean shutdown -> configure startup 1 vCPU & 1024 MB RAM -> restart VM -> verify.
+        """
+        if self.allocation_engine.emergency_stop:
+            return {"success": False, "status": "BLOCKED", "error": "Emergency Stop is active."}
+
+        with self._allocation_lock:
+            policy = self.config.get_vm_policy(vm_identifier)
+            target_vcpus = policy.get("initial_vcpus", 1)
+            target_ram_mb = policy.get("initial_ram_mb", 1024.0)
+
+            res = self.client.execute_baseline_maintenance(vm_identifier, target_vcpus=target_vcpus, target_ram_mb=target_ram_mb)
+            vm_name = res.get("vm_name", vm_identifier)
+            status = "success" if res.get("success") else ("blocked" if res.get("status") == "BLOCKED" else "failed")
+
+            if res.get("success"):
+                self.allocation_engine.record_action_applied(vm_name, "cpu")
+                self.allocation_engine.record_action_applied(vm_name, "ram")
+                self.last_xen_operation = {
+                    "timestamp": time.time(),
+                    "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                    "operation": "baseline_maintenance",
+                    "vm_name": vm_name,
+                    "resource_type": "cpu_and_ram",
+                    "requested_value": f"{target_vcpus} vCPU / {target_ram_mb} MB",
+                    "actual_value": res.get("actual_value"),
+                    "status": "verified"
+                }
+
+            self._persist_allocation_action({
+                "vm_name": vm_name,
+                "vm_uuid": res.get("vm_uuid"),
+                "resource_type": "cpu_and_ram",
+                "previous_value": 0.0,
+                "requested_value": target_vcpus,
+                "actual_value": target_vcpus if res.get("success") else 0.0,
+                "trigger_reason": "Controlled VM baseline maintenance procedure executed by administrator",
+                "action_type": "baseline_maintenance",
+                "execution_status": status,
+                "error_message": res.get("error"),
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if res.get("success") else "failed"
+            })
+            return res
+
     def apply_recommended_action(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
         """Apply pending recommendation for a specific VM."""
         state = self.get_latest_metrics()

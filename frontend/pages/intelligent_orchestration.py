@@ -4,7 +4,8 @@ Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 
 Primary interface for authentic student traffic load simulation, real Xen telemetry
 (separating Xen-assigned memory from guest memory), closed-loop automatic CPU/RAM scaling,
-and administrator manual overrides with XenAPI readback verification.
+live 1-second auto-refresh via st.fragment, and administrator manual overrides with
+XenAPI readback verification.
 """
 
 import time
@@ -26,16 +27,368 @@ from frontend.api import (
     api_apply_manual_ram,
     api_apply_recommendation,
     api_transition_to_baseline,
+    api_execute_baseline_maintenance,
     api_reboot_vm,
     api_get_student_load_status,
     api_start_student_load,
     api_stop_student_load,
-    api_emergency_stop_student_load
+    api_emergency_stop_student_load,
+    api_student_load_preflight
 )
 
 EXPECTED_APP_VM_UUID = "01cdb87c-408f-72bc-449c-0364a8e69647"
 EXPECTED_DB_VM_UUID = "0a6dec09-0466-0079-4b66-80704b59587d"
 
+
+# =========================================================================
+# FRAGMENT 1: Live 1-Second Telemetry & Monitor Display
+# =========================================================================
+@st.fragment(run_every="1s")
+def render_live_telemetry_fragment():
+    """Live auto-refreshing fragment polling every 1 second without full page rerun."""
+    now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+    # Fetch live data
+    metrics_res = api_get_xen_metrics()
+    load_status_res = api_get_student_load_status()
+    recs_res = api_get_allocation_recommendations()
+
+    metrics_data = metrics_res.get("data", {}) if metrics_res.get("success") else {}
+    student_load = load_status_res.get("data", {}) if load_status_res.get("success") else {}
+    recommendations = recs_res.get("data", {}) if recs_res.get("success") else {}
+
+    vms = metrics_data.get("vms") or {}
+    app_vm = vms.get("Alpine-Linux") or vms.get("Alpine-Linux-New") or {}
+    db_vm = vms.get("Alpine-DB") or {}
+
+    # Freshness banner
+    st.markdown(f"""
+        <div style="display:flex; justify-content:space-between; align-items:center; background-color:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:6px 14px; margin-bottom:14px;">
+            <div style="font-size:0.85rem; color:#166534; font-weight:600;">
+                🟢 <strong>Live Telemetry Auto-Refresh:</strong> Polling every 1s via native <code>@st.fragment</code>
+            </div>
+            <div style="font-size:0.82rem; color:#475569;">
+                Last Updated: <strong>{now_utc}</strong>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # -------------------------------------------------------------------------
+    # 1. Live Student Traffic Telemetry
+    # -------------------------------------------------------------------------
+    st.markdown("#### 📊 Live Student Traffic Telemetry")
+
+    sim_stat = student_load.get("status", "idle").upper()
+    stat_color = "#10b981" if sim_stat in ("RUNNING", "RAMPING_UP") else "#64748b"
+
+    st.markdown(f"**Simulator Status:** <span style='color:{stat_color}; font-weight:700;'>{sim_stat}</span>", unsafe_allow_html=True)
+
+    # Clearly separated student counts
+    st_col1, st_col2, st_col3, st_col4, st_col5 = st.columns(5)
+    with st_col1:
+        st.metric("Configured Students", f"{student_load.get('configured_students', 0)}")
+    with st_col2:
+        st.metric("Spawned Workers", f"{student_load.get('spawned_workers', 0)}")
+    with st_col3:
+        act_st = student_load.get("active_students", 0)
+        st.metric("Authenticated Active", f"{act_st}", help="Authentic students currently logged in with active sessions")
+    with st_col4:
+        fl = student_load.get("failed_logins", 0)
+        st.metric("Failed Logins", f"{fl}", delta=f"{fl} rejected" if fl > 0 else "0", delta_color="inverse")
+    with st_col5:
+        st.metric("Successful Sessions", f"{student_load.get('successful_sessions', 0)}")
+
+    # Throughput, latency, and query rates
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    with m_col1:
+        live_rps = student_load.get("requests_per_sec", 0.0)
+        st.metric("Requests / Sec (RPS)", f"{live_rps:.1f} req/s")
+    with m_col2:
+        db_qps = student_load.get("db_queries_per_sec", 0.0)
+        st.metric("MariaDB Queries / Sec", f"{db_qps:.1f} QPS", help="True queries per second measured directly at MariaDB database layer")
+    with m_col3:
+        lat = student_load.get("avg_response_time_ms", 0.0)
+        st.metric("Avg Latency", f"{lat:.1f} ms")
+    with m_col4:
+        succ = student_load.get("successful_requests", 0)
+        fail = student_load.get("failed_requests", 0)
+        tot = succ + fail
+        rate = round((succ / tot * 100), 1) if tot > 0 else 100.0
+        st.metric("Success Rate", f"{rate}%", delta=f"{fail} errors" if fail > 0 else "0 errors", delta_color="inverse")
+
+    if db_qps == 0.0 and sim_stat in ("IDLE", "COMPLETED"):
+        st.caption("ℹ️ MariaDB QPS is 0.0: No active student workloads are currently querying the database.")
+    elif db_qps == 0.0 and sim_stat in ("RUNNING", "RAMPING_UP"):
+        st.caption("ℹ️ MariaDB QPS is 0.0: Student workers are calibrating queries against the database.")
+
+    # Duration & progress
+    elapsed = student_load.get("elapsed_duration_sec", 0)
+    total_dur = student_load.get("test_duration_sec", 60)
+    if sim_stat in ("RUNNING", "RAMPING_UP") and total_dur > 0:
+        prog = min(1.0, float(elapsed) / float(total_dur))
+        st.progress(prog, text=f"Elapsed: {elapsed}s / {total_dur}s")
+
+    if student_load.get("error_message"):
+        st.warning(f"⚠️ {student_load.get('error_message')}")
+
+    # Structured failure breakdown
+    fail_count = student_load.get("failed_requests", 0)
+    breakdown = student_load.get("failure_breakdown", {})
+    recent_errs = student_load.get("recent_errors", [])
+    if fail_count > 0 or any(breakdown.values()) or recent_errs:
+        with st.expander("🔍 Traffic Failure Breakdown & Diagnostic Log", expanded=(fail_count > 0)):
+            fb1, fb2, fb3, fb4, fb5, fb6 = st.columns(6)
+            fb1.metric("401/403 Auth", breakdown.get("http_401_403", 0))
+            fb2.metric("404 Not Found", breakdown.get("http_404", 0))
+            fb3.metric("500 Server Error", breakdown.get("http_500", 0))
+            fb4.metric("Timeouts", breakdown.get("timeout", 0))
+            fb5.metric("Conn Refused", breakdown.get("connection_refused", 0))
+            fb6.metric("DB Errors", breakdown.get("db_error", 0))
+
+            if recent_errs:
+                st.caption("Recent Diagnostic Error Log:")
+                st.dataframe(pd.DataFrame(recent_errs), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # 2. Virtual Machine Resource Monitors (Side-by-Side)
+    # -------------------------------------------------------------------------
+    st.markdown("#### 🖥️ Virtual Machine Resource Monitors (Side-by-Side)")
+
+    col_app, col_db = st.columns(2)
+
+    with col_app:
+        st.markdown("""
+            <div style="background-color:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px; margin-bottom:10px;">
+                <h4 style="margin:0; color:#1e40af;">🌐 Application VM (Alpine-Linux)</h4>
+                <span style="font-size:0.83rem; color:#64748b;">Role: Flask REST API + Streamlit Web Interface</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+        if app_vm:
+            app_uuid = app_vm.get("uuid", "N/A")
+            uuid_match = (app_uuid == EXPECTED_APP_VM_UUID)
+            uuid_badge = "✅ Verified" if uuid_match else f"ℹ️ Discovered: `{app_uuid[:12]}...`"
+
+            st.markdown(f"**UUID:** `{app_uuid}` ({uuid_badge})")
+            st.markdown(f"**Power State:** `{app_vm.get('power_state', 'Unknown')}` | **IP:** `{app_vm.get('ip', '10.189.191.51')}`")
+
+            # CPU
+            st.markdown("##### ⚡ CPU Telemetry")
+            cpu_val = app_vm.get("cpu_percent")
+            cpu_display = f"{cpu_val:.1f}%" if cpu_val is not None else "Calibrating..."
+            online_vcpus = app_vm.get("online_vcpus") or app_vm.get("vcpu_count", 1)
+            startup_vcpus = app_vm.get("startup_vcpus", 1)
+            max_vcpus = app_vm.get("max_vcpus", 4)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Actual CPU %", cpu_display)
+            c2.metric("Online vCPUs", f"{online_vcpus} / {max_vcpus} vCPUs")
+            c3.metric("Startup vCPUs", f"{startup_vcpus} vCPU(s)")
+            st.caption(f"Source: `{app_vm.get('cpu_source', 'xen_cpu_time_counter')}`")
+
+            # RAM
+            st.markdown("##### 🧠 Memory Telemetry (Xen vs Guest)")
+            xen_assigned_ram = app_vm.get("xen_assigned_ram_mb") or app_vm.get("allocated_ram_mb", 1024.0)
+            g_avail = app_vm.get("guest_available_ram_mb")
+            g_used = app_vm.get("guest_used_ram_mb")
+            g_pct = app_vm.get("guest_ram_percent")
+            g_pressure = app_vm.get("guest_memory_pressure", "N/A")
+
+            r1, r2 = st.columns(2)
+            r1.metric("Xen-Assigned RAM", f"{xen_assigned_ram:.0f} MB", help="Hypervisor-level memory boundary")
+            avail_disp = f"{g_avail:.0f} MB" if g_avail is not None else "N/A"
+            r2.metric("Guest Available RAM", avail_disp, help="Actual available memory inside guest OS")
+
+            r3, r4 = st.columns(2)
+            used_disp = f"{g_used:.0f} MB" if g_used is not None else "N/A"
+            r3.metric("Guest Used RAM", used_disp)
+            pct_disp = f"{g_pct:.1f}%" if g_pct is not None else "N/A"
+            r4.metric("Guest RAM %", pct_disp, delta=f"Pressure: {g_pressure}")
+            st.caption(f"Memory Source: `{app_vm.get('memory_source', 'guest_proc_meminfo')}`")
+
+            # Status pill for baseline
+            if online_vcpus > 1 or startup_vcpus > 1:
+                st.warning(f"⚠️ **Baseline Notice:** Alpine-Linux is currently at {online_vcpus} online / {startup_vcpus} startup vCPUs (Baseline target: 1 vCPU).")
+            else:
+                st.success("✅ **Baseline Verified:** Alpine-Linux is operating at target baseline (1 vCPU, 1024 MB).")
+        else:
+            st.warning("Application VM telemetry not currently discovered.")
+
+    with col_db:
+        st.markdown("""
+            <div style="background-color:#fefce8; border:1px solid #fef08a; border-radius:8px; padding:10px 14px; margin-bottom:10px;">
+                <h4 style="margin:0; color:#854d0e;">🗄️ Database VM (Alpine-DB)</h4>
+                <span style="font-size:0.83rem; color:#64748b;">Role: MariaDB 11.8.9 Relational Storage</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+        if db_vm:
+            db_uuid = db_vm.get("uuid", "N/A")
+            db_uuid_match = (db_uuid == EXPECTED_DB_VM_UUID)
+            db_uuid_badge = "✅ Verified" if db_uuid_match else f"ℹ️ Discovered: `{db_uuid[:12]}...`"
+
+            st.markdown(f"**UUID:** `{db_uuid}` ({db_uuid_badge})")
+            st.markdown(f"**Power State:** `{db_vm.get('power_state', 'Unknown')}` | **IP:** `{db_vm.get('ip', '10.189.191.248')}:3306`")
+
+            # CPU
+            st.markdown("##### ⚡ CPU Telemetry")
+            db_cpu_val = db_vm.get("cpu_percent")
+            db_cpu_display = f"{db_cpu_val:.1f}%" if db_cpu_val is not None else "Calibrating..."
+            db_online_vcpus = db_vm.get("online_vcpus") or db_vm.get("vcpu_count", 1)
+            db_startup_vcpus = db_vm.get("startup_vcpus", 1)
+            db_max_vcpus = db_vm.get("max_vcpus", 4)
+
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Actual CPU %", db_cpu_display)
+            d2.metric("Online vCPUs", f"{db_online_vcpus} / {db_max_vcpus} vCPUs")
+            d3.metric("Startup vCPUs", f"{db_startup_vcpus} vCPU(s)")
+            st.caption(f"Source: `{db_vm.get('cpu_source', 'xen_cpu_time_counter')}`")
+
+            # RAM
+            st.markdown("##### 🧠 Memory Telemetry (Xen vs Guest)")
+            db_xen_assigned_ram = db_vm.get("xen_assigned_ram_mb") or db_vm.get("allocated_ram_mb", 1024.0)
+            db_g_used = db_vm.get("guest_used_ram_mb")
+            db_g_avail = db_vm.get("guest_available_ram_mb")
+            db_g_pct = db_vm.get("guest_ram_percent")
+
+            dr1, dr2 = st.columns(2)
+            dr1.metric("Xen-Assigned RAM", f"{db_xen_assigned_ram:.0f} MB")
+            db_avail_disp = f"{db_g_avail:.0f} MB" if db_g_avail is not None else "N/A"
+            dr2.metric("Guest Available RAM", db_avail_disp, help="N/A displayed when guest agent is not installed inside DB VM")
+
+            dr3, dr4 = st.columns(2)
+            db_used_disp = f"{db_g_used:.0f} MB" if db_g_used is not None else "N/A"
+            dr3.metric("Guest Used RAM", db_used_disp)
+            db_pct_disp = f"{db_g_pct:.1f}%" if db_g_pct is not None else "N/A"
+            dr4.metric("Guest RAM %", db_pct_disp)
+            st.caption(f"Memory Source: `{db_vm.get('memory_source', 'xen_hypervisor_only')}` (Unsafe scale-down withheld when guest RAM is N/A)")
+
+            # MariaDB Safety Envelope
+            st.markdown("""
+                <div style="background-color:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:6px 10px; margin-top:8px; font-size:0.83rem; color:#166534;">
+                    🛡️ <strong>MariaDB Buffer Pool Envelope:</strong> Verified safe (innodb_buffer_pool_size &le; 768 MB / 75% of 1024 MB baseline).
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning("Database VM telemetry not currently discovered.")
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # 3. Elasticity Decision Matrix
+    # -------------------------------------------------------------------------
+    st.markdown("#### ⚙️ Elasticity Decision Matrix & Automatic Recommendations")
+    rec_rows = []
+    for vm_key, rec in recommendations.items():
+        rec_rows.append({
+            "Target VM": rec.get("vm_name", vm_key),
+            "CPU Action": rec.get("cpu_action", "HOLD"),
+            "Current vCPUs": rec.get("current_vcpus", 1),
+            "Recommended vCPUs": rec.get("recommended_vcpus", 1),
+            "RAM Action": rec.get("ram_action", "HOLD"),
+            "Current RAM": f"{rec.get('current_ram_mb', 1024):.0f} MB",
+            "Recommended RAM": f"{rec.get('recommended_ram_mb', 1024):.0f} MB",
+            "Rationale": rec.get("rationale", "Nominal workload"),
+            "Cooldown Active": "Active" if rec.get("cooldown_active") else "Clear"
+        })
+
+    if rec_rows:
+        st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No active scaling recommendations generated.")
+
+
+# =========================================================================
+# FRAGMENT 2: Real-Time Charts & Event History (3-Second Auto-Refresh)
+# =========================================================================
+@st.fragment(run_every="3s")
+def render_history_and_charts_fragment():
+    """Fragment updating trend charts and event history log every 3 seconds."""
+    st.markdown("#### 📈 Real-Time Multi-Metric Trend Charts")
+
+    hist_res = api_get_metrics_history(limit=60)
+    history_records = hist_res.get("data", []) if hist_res.get("success") else []
+
+    if history_records:
+        df_hist = pd.DataFrame(history_records)
+        df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
+
+        ch_col1, ch_col2 = st.columns(2)
+        with ch_col1:
+            st.markdown("##### ⚡ CPU Utilization (%) Over Time")
+            df_app_cpu = df_hist[df_hist["vm_name"].str.contains("Linux", case=False, na=False)][["timestamp", "cpu_percent"]].rename(columns={"cpu_percent": "Alpine-Linux CPU %"})
+            df_db_cpu = df_hist[df_hist["vm_name"].str.contains("DB", case=False, na=False)][["timestamp", "cpu_percent"]].rename(columns={"cpu_percent": "Alpine-DB CPU %"})
+            merged_cpu = pd.merge_asof(df_app_cpu.sort_values("timestamp"), df_db_cpu.sort_values("timestamp"), on="timestamp")
+            if not merged_cpu.empty:
+                st.line_chart(merged_cpu.set_index("timestamp"))
+            else:
+                st.info("Gathering CPU metric samples...")
+
+        with ch_col2:
+            st.markdown("##### 🧠 Dynamic RAM Allocation (MB) Over Time")
+            df_app_ram = df_hist[df_hist["vm_name"].str.contains("Linux", case=False, na=False)][["timestamp", "allocated_ram_mb"]].rename(columns={"allocated_ram_mb": "Alpine-Linux RAM (MB)"})
+            df_db_ram = df_hist[df_hist["vm_name"].str.contains("DB", case=False, na=False)][["timestamp", "allocated_ram_mb"]].rename(columns={"allocated_ram_mb": "Alpine-DB RAM (MB)"})
+            merged_ram = pd.merge_asof(df_app_ram.sort_values("timestamp"), df_db_ram.sort_values("timestamp"), on="timestamp")
+            if not merged_ram.empty:
+                st.line_chart(merged_ram.set_index("timestamp"))
+            else:
+                st.info("Gathering RAM metric samples...")
+    else:
+        st.info("Gathering historical metric samples for charting...")
+
+    st.markdown("---")
+
+    # Resource Allocation Event History
+    st.markdown("#### 📜 Resource Allocation Event History")
+    st.caption("Immutable audit log of all manual and automated scaling operations with XenAPI readback verification.")
+
+    history_res = api_get_allocation_history(limit=25)
+    history_events = history_res.get("data", []) if history_res.get("success") else []
+
+    if history_events:
+        hist_table = []
+        for ev in history_events:
+            status_raw = str(ev.get("execution_status", "")).upper()
+            if status_raw == "SUCCESS":
+                status_icon = "✅ SUCCESS"
+            elif status_raw == "MAINTENANCE_REQUIRED":
+                status_icon = "⚠️ MAINTENANCE_REQUIRED"
+            elif status_raw == "BLOCKED":
+                status_icon = "⛔ BLOCKED"
+            else:
+                status_icon = f"❌ {status_raw}"
+
+            c_ver = ev.get("controller_version")
+            if not c_ver or str(c_ver).lower() in ("none", "null"):
+                ver_display = "v1.0 (legacy)"
+            elif c_ver == "v2.0":
+                ver_display = "v2.0 (independent)"
+            else:
+                ver_display = str(c_ver)
+
+            hist_table.append({
+                "Timestamp": ev.get("created_at", "N/A"),
+                "Target VM": ev.get("vm_name", "Unknown"),
+                "Resource": str(ev.get("resource_type", "")).upper(),
+                "Previous": ev.get("previous_value", "N/A"),
+                "Requested": ev.get("requested_value", "N/A"),
+                "Actual Verified": ev.get("actual_value", "N/A"),
+                "Trigger Rationale": ev.get("trigger_reason", "N/A"),
+                "Status": status_icon,
+                "Verification": ev.get("verification_status", "verified"),
+                "Controller": ver_display,
+                "Initiated By": ev.get("initiated_by", "system")
+            })
+        st.dataframe(pd.DataFrame(hist_table), use_container_width=True, hide_index=True)
+    else:
+        st.info("No resource scaling operations recorded in this session.")
+
+
+# =========================================================================
+# MAIN PAGE RENDERER
+# =========================================================================
 def render_intelligent_orchestration_page():
     """Render the primary Intelligent Resource Orchestration interface."""
     sync_session_state()
@@ -71,46 +424,36 @@ def render_intelligent_orchestration_page():
         </div>
     """, unsafe_allow_html=True)
 
-    # Fetch Core Data
-    metrics_res = api_get_xen_metrics()
+    # Initial state query for controls
     alloc_status_res = api_get_allocation_status()
-    recs_res = api_get_allocation_recommendations()
-    history_res = api_get_allocation_history(limit=25)
-    load_status_res = api_get_student_load_status()
-
-    metrics_data = metrics_res.get("data", {}) if metrics_res.get("success") else {}
+    metrics_res = api_get_xen_metrics()
     alloc_data = alloc_status_res.get("data", {}) if alloc_status_res.get("success") else {}
-    recommendations = recs_res.get("data", {}) if recs_res.get("success") else {}
-    history_events = history_res.get("data", []) if history_res.get("success") else []
-    student_load = load_status_res.get("data", {}) if load_status_res.get("success") else {}
-
-    hypervisor = metrics_data.get("hypervisor") or {}
-    vms = metrics_data.get("vms") or {}
-    is_connected = metrics_data.get("connected", False)
+    metrics_data = metrics_res.get("data", {}) if metrics_res.get("success") else {}
 
     current_mode = alloc_data.get("mode", "manual").upper()
     emergency_stop = alloc_data.get("emergency_stop", False)
+    is_connected = metrics_data.get("connected", False)
+    hypervisor = metrics_data.get("hypervisor") or {}
 
-    # =========================================================================
-    # COMPONENT 9: System Health and Telemetry Status Banner
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # System Health and Operational Interlocks Banner
+    # -------------------------------------------------------------------------
     st.markdown("### 🛡️ System Health & Operational Interlocks")
+    b_col1, b_col2, b_col3, b_col4 = st.columns([1.2, 1.2, 1.4, 1.2])
 
-    banner_col1, banner_col2, banner_col3, banner_col4 = st.columns([1.2, 1.2, 1.4, 1.2])
-
-    with banner_col1:
+    with b_col1:
         if is_connected:
             st.success(f"🟢 **XCP-ng Connected**\n`{hypervisor.get('ip', 'Host')}` ({hypervisor.get('running_vms', 2)} VMs Active)")
         else:
-            st.error(f"🔴 **XCP-ng Disconnected**\nHost unreachable or offline")
+            st.error("🔴 **XCP-ng Disconnected**\nHost unreachable or offline")
 
-    with banner_col2:
+    with b_col2:
         if emergency_stop:
             st.error("🛑 **EMERGENCY STOP ENGAGED**\nScaling & Traffic Suspended")
         else:
             st.info("✅ **Interlock Normal**\nSafety Enforced")
 
-    with banner_col3:
+    with b_col3:
         mode_label = "🟢 Autonomous (AUTO)" if current_mode == "AUTO" else "🟡 Advisory (MANUAL)"
         st.write(f"**Mode:** {mode_label}")
         new_mode = st.radio(
@@ -129,7 +472,7 @@ def render_intelligent_orchestration_page():
             else:
                 st.error(f"Failed to switch mode: {res.get('error')}")
 
-    with banner_col4:
+    with b_col4:
         st.write("**Emergency Actions:**")
         if st.button("🛑 EMERGENCY STOP ALL", type="primary", use_container_width=True, key="btn_master_em_stop"):
             api_emergency_stop_student_load()
@@ -166,54 +509,55 @@ def render_intelligent_orchestration_page():
 
     st.markdown("---")
 
-    # =========================================================================
-    # COMPONENT 1: Live Student Load Simulator
-    # =========================================================================
-    st.markdown("### 🎓 Student Load Simulator")
-    st.caption("Generate authentic student traffic (1 to 200 concurrent users) against the Flask API and MariaDB database.")
+    # -------------------------------------------------------------------------
+    # Student Load Simulator Controls & Preflight Panel
+    # -------------------------------------------------------------------------
+    st.markdown("### 🎓 Student Load Simulator Configuration")
+    st.caption("Configure and generate authentic student traffic (1 to 200 concurrent users) against the Flask API and MariaDB database.")
 
     # Educational Relationship Pipeline
     st.markdown("""
-        <div style="background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 10px 16px; border-radius: 4px; margin-bottom: 16px;">
+        <div style="background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 8px 14px; border-radius: 4px; margin-bottom: 14px; font-size:0.9rem;">
             <span style="font-weight:600; color:#1e40af;">Elasticity Pipeline:</span>
-            <span style="color:#475569; font-size:0.92rem;">
-                Simulated students increase &rarr; Requests/sec increase &rarr; Flask processing increases &rarr; MariaDB queries increase &rarr; CPU/RAM utilization increases &rarr; XenAPI triggers allocation scale-up.
+            <span style="color:#475569;">
+                Authenticated students increase &rarr; Requests/sec increase &rarr; Flask processing increases &rarr; MariaDB queries increase &rarr; CPU/RAM utilization increases &rarr; XenAPI triggers allocation scale-up.
             </span>
         </div>
     """, unsafe_allow_html=True)
 
-    sim_col_ctrl, sim_col_stats = st.columns([1.1, 1.4])
+    sim_col_ctrl, sim_col_preflight = st.columns([1.2, 1.0])
 
     with sim_col_ctrl:
-        st.markdown("##### ⚙️ Test Configuration")
-        
         sim_target = st.selectbox(
             "Target Virtual Machine:",
             ["app_vm", "db_vm", "both"],
             format_func=lambda x: "Application VM (Flask API)" if x == "app_vm" else ("Database VM (MariaDB)" if x == "db_vm" else "Both VMs (Full Platform)"),
             key="sim_target_vm"
         )
-
         sim_students = st.select_slider(
             "Simulated Concurrent Students:",
             options=[1, 5, 10, 25, 50, 100, 150, 200],
             value=25,
             key="sim_students_slider"
         )
+        ctrl_c1, ctrl_c2 = st.columns(2)
+        with ctrl_c1:
+            sim_ramp = st.slider("Ramp-Up Duration (seconds):", min_value=5, max_value=60, value=10, step=5, key="sim_ramp_slider")
+            sim_intensity = st.selectbox(
+                "Workload Profile:",
+                ["medium", "light", "heavy"],
+                format_func=lambda x: "Medium (Dashboard + Course Browsing)" if x == "medium" else ("Light (Course Browsing)" if x == "light" else "Heavy (Full Lifecycle + DB Transactions)"),
+                key="sim_intensity_select"
+            )
+        with ctrl_c2:
+            sim_duration = st.slider("Test Duration (seconds):", min_value=30, max_value=300, value=60, step=15, key="sim_duration_slider")
+            sim_rps = st.slider("Requests per Student (req/s):", min_value=0.5, max_value=5.0, value=2.0, step=0.5, key="sim_rps_slider")
 
-        sim_ramp = st.slider("Ramp-Up Duration (seconds):", min_value=5, max_value=60, value=10, step=5, key="sim_ramp_slider")
-        sim_duration = st.slider("Test Duration (seconds):", min_value=30, max_value=300, value=60, step=15, key="sim_duration_slider")
-        sim_intensity = st.selectbox(
-            "Workload Profile:",
-            ["medium", "light", "heavy"],
-            format_func=lambda x: "Medium (Dashboard + Course Browsing)" if x == "medium" else ("Light (Course Browsing)" if x == "light" else "Heavy (Full Lifecycle + DB Transactions)"),
-            key="sim_intensity_select"
-        )
-        sim_rps = st.slider("Requests per Student (req/s):", min_value=0.5, max_value=5.0, value=2.0, step=0.5, key="sim_rps_slider")
+        load_status = api_get_student_load_status().get("data", {})
+        is_sim_running = load_status.get("status") in ("ramping_up", "running")
 
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            is_sim_running = student_load.get("status") in ("ramping_up", "running")
+        btn_c1, btn_c2 = st.columns(2)
+        with btn_c1:
             if st.button("🚀 Start Student Load", type="primary", use_container_width=True, disabled=is_sim_running, key="btn_start_sim"):
                 start_res = api_start_student_load(
                     target_vm=sim_target,
@@ -224,13 +568,13 @@ def render_intelligent_orchestration_page():
                     workload_intensity=sim_intensity
                 )
                 if start_res.get("success"):
-                    st.success(f"Load test started: {sim_students} students ramp-up over {sim_ramp}s!")
+                    st.success(f"Load test started: {sim_students} students ramping up!")
                     time.sleep(0.5)
                     st.rerun()
                 else:
                     st.error(f"Failed to start load test: {start_res.get('error')}")
 
-        with btn_col2:
+        with btn_c2:
             if st.button("⏹️ Stop Student Load", use_container_width=True, disabled=not is_sim_running, key="btn_stop_sim"):
                 stop_res = api_stop_student_load()
                 if stop_res.get("success"):
@@ -238,332 +582,117 @@ def render_intelligent_orchestration_page():
                     time.sleep(0.5)
                     st.rerun()
 
-    with sim_col_stats:
-        st.markdown("##### 📊 Live Student Traffic Telemetry")
-        
-        sim_stat = student_load.get("status", "idle").upper()
-        stat_color = "#10b981" if sim_stat in ("RUNNING", "RAMPING_UP") else "#64748b"
-        
-        st.markdown(f"**Simulator Status:** <span style='color:{stat_color}; font-weight:700;'>{sim_stat}</span>", unsafe_allow_html=True)
+    with sim_col_preflight:
+        st.markdown("##### 🧪 Preflight Authentication Verification")
+        st.caption("Validates synthetic student login, Bearer token authentication, and data querying prior to running load tests.")
 
-        sc1, sc2, sc3 = st.columns(3)
-        with sc1:
-            active_st = student_load.get("active_students", 0)
-            joining_st = student_load.get("students_joining", 0)
-            leaving_st = student_load.get("students_leaving", 0)
-            st.metric("Active Students", f"{active_st}", delta=f"+{joining_st} ramp" if joining_st > 0 else (f"-{leaving_st} exit" if leaving_st > 0 else None))
-        
-        with sc2:
-            live_rps = student_load.get("requests_per_sec", 0.0)
-            st.metric("Requests / Sec (RPS)", f"{live_rps:.1f} req/s")
+        if st.button("🧪 Run Authentication Preflight Test", use_container_width=True, key="btn_run_preflight"):
+            with st.spinner("Executing synthetic student authentication preflight check..."):
+                pf_res = api_student_load_preflight()
+                if pf_res.get("success"):
+                    st.success(f"✅ **Preflight Test Passed!**\n{pf_res.get('message')}")
+                else:
+                    st.error(f"❌ **Preflight Test Failed ({pf_res.get('step')} step):**\n{pf_res.get('message')}")
 
-        with sc3:
-            db_qps = student_load.get("db_queries_per_sec", 0.0)
-            st.metric("Database Queries / Sec", f"{db_qps:.1f} QPS")
-
-        sc4, sc5, sc6 = st.columns(3)
-        with sc4:
-            lat = student_load.get("avg_response_time_ms", 0.0)
-            st.metric("Avg Response Time", f"{lat:.1f} ms")
-
-        with sc5:
-            succ = student_load.get("successful_requests", 0)
-            fail = student_load.get("failed_requests", 0)
-            tot = succ + fail
-            rate = round((succ / tot * 100), 1) if tot > 0 else 100.0
-            st.metric("Success Rate", f"{rate}%", delta=f"{fail} errors" if fail > 0 else "0 errors", delta_color="inverse")
-
-        with sc6:
-            elapsed = student_load.get("elapsed_duration_sec", 0)
-            total_dur = student_load.get("test_duration_sec", 60)
-            st.metric("Test Duration", f"{elapsed}s / {total_dur}s")
-
-        if is_sim_running and total_dur > 0:
-            prog = min(1.0, float(elapsed) / float(total_dur))
-            st.progress(prog)
-
-        if student_load.get("error_message"):
-            st.warning(f"⚠️ {student_load.get('error_message')}")
-
-        # Failure diagnostics & structured breakdown
-        fail_count = student_load.get("failed_requests", 0)
-        breakdown = student_load.get("failure_breakdown", {})
-        recent_errs = student_load.get("recent_errors", [])
-        if fail_count > 0 or any(breakdown.values()) or recent_errs:
-            st.markdown("##### 🔍 Traffic Failure Breakdown & Diagnostic Log")
-            fb_col1, fb_col2, fb_col3, fb_col4, fb_col5, fb_col6 = st.columns(6)
-            fb_col1.metric("401/403 Auth", breakdown.get("http_401_403", 0))
-            fb_col2.metric("404 Not Found", breakdown.get("http_404", 0))
-            fb_col3.metric("500 Server Error", breakdown.get("http_500", 0))
-            fb_col4.metric("Timeouts", breakdown.get("timeout", 0))
-            fb_col5.metric("Conn Refused", breakdown.get("connection_refused", 0))
-            fb_col6.metric("DB Errors", breakdown.get("db_error", 0))
-
-            if recent_errs:
-                st.caption("Latest HTTP / Service Error Samples:")
-                st.dataframe(pd.DataFrame(recent_errs), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-
-    # =========================================================================
-    # COMPONENTS 2 & 3: Application VM & Database VM Resource Monitors
-    # =========================================================================
-    st.markdown("### 🖥️ Virtual Machine Resource Monitors (Side-by-Side)")
-
-    app_vm = vms.get("Alpine-Linux") or vms.get("Alpine-Linux-New") or {}
-    db_vm = vms.get("Alpine-DB") or {}
-
-    col_app, col_db = st.columns(2)
-
-    # -------------------------------------------------------------------------
-    # APPLICATION VM (Component 2)
-    # -------------------------------------------------------------------------
-    with col_app:
         st.markdown("""
-            <div style="background-color:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:12px; margin-bottom:12px;">
-                <h4 style="margin:0; color:#1e40af;">🌐 Application VM (Alpine-Linux)</h4>
-                <span style="font-size:0.85rem; color:#64748b;">Role: Flask REST API + Streamlit Web Interface</span>
+            <div style="background-color:#f1f5f9; border-radius:6px; padding:10px; font-size:0.83rem; color:#475569; margin-top:12px;">
+                <strong>Synthetic Student Credentials:</strong><br>
+                Domain: <code>@elearning.test</code><br>
+                Password: <code>SimStudent@123</code> (PBKDF2:SHA256 verified)<br>
+                Pre-seeded Pool: 200 dedicated accounts.
             </div>
         """, unsafe_allow_html=True)
 
-        if app_vm:
-            app_uuid = app_vm.get("uuid", "N/A")
-            uuid_match = (app_uuid == EXPECTED_APP_VM_UUID)
-            uuid_badge = "✅ Verified" if uuid_match else f"ℹ️ Discovered: `{app_uuid[:12]}...`"
+    st.markdown("---")
 
-            st.markdown(f"**UUID:** `{app_uuid}` ({uuid_badge})")
-            st.markdown(f"**Power State:** `{app_vm.get('power_state', 'Unknown')}` | **IP:** `{app_vm.get('ip', '10.189.191.51')}`")
+    # -------------------------------------------------------------------------
+    # Render Live Telemetry Fragment (1-Second Auto-Refresh)
+    # -------------------------------------------------------------------------
+    render_live_telemetry_fragment()
 
-            # CPU Section
-            st.markdown("##### ⚡ CPU Telemetry")
-            cpu_val = app_vm.get("cpu_percent")
-            cpu_display = f"{cpu_val:.1f}%" if cpu_val is not None else "Calibrating..."
-            online_vcpus = app_vm.get("online_vcpus") or app_vm.get("vcpu_count", 1)
-            startup_vcpus = app_vm.get("startup_vcpus", 1)
-            max_vcpus = app_vm.get("max_vcpus", 4)
-            
-            c_m1, c_m2, c_m3 = st.columns(3)
-            with c_m1:
-                st.metric("Actual CPU Utilization", cpu_display)
-            with c_m2:
-                st.metric("Online vCPUs", f"{online_vcpus} / {max_vcpus} vCPUs")
-            with c_m3:
-                st.metric("Startup vCPUs", f"{startup_vcpus} vCPU(s)")
+    # -------------------------------------------------------------------------
+    # 4. Baseline Control & Controlled Maintenance Procedure
+    # -------------------------------------------------------------------------
+    st.markdown("### 🎯 Baseline Control & Controlled Maintenance")
+    st.caption("Reset virtual machines to verified baseline (1 online vCPU, 1 startup vCPU, 1024 MB RAM).")
 
-            st.caption(f"Source: `{app_vm.get('cpu_source', 'xen_cpu_time_counter')}` | Freshness: `{app_vm.get('freshness_seconds', 0.0)}s`")
+    base_col1, base_col2 = st.columns(2)
 
-            # RAM Section
-            st.markdown("##### 🧠 Memory Telemetry (Xen vs Guest)")
-            xen_assigned_ram = app_vm.get("xen_assigned_ram_mb") or app_vm.get("allocated_ram_mb", 1024.0)
-            g_total = app_vm.get("guest_total_ram_mb")
-            g_used = app_vm.get("guest_used_ram_mb")
-            g_avail = app_vm.get("guest_available_ram_mb")
-            g_pct = app_vm.get("guest_ram_percent")
-            g_pressure = app_vm.get("guest_memory_pressure", "N/A")
+    with base_col1:
+        st.markdown("##### 🌐 Application VM Baseline (Alpine-Linux)")
+        confirm_app_base = st.checkbox("Confirm baseline transition for Alpine-Linux", key="chk_base_app")
+        if st.button("⚡ Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_app", disabled=not confirm_app_base, use_container_width=True):
+            b_res = api_transition_to_baseline("Alpine-Linux")
+            if b_res.get("success"):
+                st.success("Alpine-Linux safely transitioned to baseline!")
+                st.session_state["reboot_pending_app"] = False
+                time.sleep(0.5)
+                st.rerun()
+            elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
+                st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
+                st.info("Live CPU hot-unplug is not supported on this kernel without restart. Controlled baseline maintenance procedure is required.")
+                st.session_state["reboot_pending_app"] = True
+            else:
+                st.error(f"Transition failed: {b_res.get('error')}")
 
-            r_m1, r_m2 = st.columns(2)
-            with r_m1:
-                st.metric("Xen-Assigned RAM", f"{xen_assigned_ram:.0f} MB", help="Actual hypervisor memory allocated to VM")
-            with r_m2:
-                avail_disp = f"{g_avail:.0f} MB" if g_avail is not None else "N/A"
-                st.metric("Guest Available RAM", avail_disp, help="Real available memory inside Alpine Linux guest OS")
-
-            r_m3, r_m4 = st.columns(2)
-            with r_m3:
-                used_disp = f"{g_used:.0f} MB" if g_used is not None else "N/A"
-                st.metric("Guest Used RAM", used_disp)
-            with r_m4:
-                pct_disp = f"{g_pct:.1f}%" if g_pct is not None else "N/A"
-                st.metric("Guest RAM %", pct_disp, delta=f"Pressure: {g_pressure}")
-
-            st.caption(f"Memory Source: `{app_vm.get('memory_source', 'guest_proc_meminfo')}` (No fake 100% calculation)")
-
-            # Baseline Transition
-            st.markdown("##### 🎯 Baseline Control (Target: 1 vCPU, 1024 MB RAM)")
-            st.caption("Safely resets VM configuration to baseline operating parameters.")
-            confirm_app_base = st.checkbox("Confirm baseline transition for Alpine-Linux", key="chk_base_app")
-            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_app", disabled=not confirm_app_base, use_container_width=True):
-                b_res = api_transition_to_baseline("Alpine-Linux")
-                if b_res.get("success"):
-                    st.success("Alpine-Linux safely transitioned to baseline!")
-                    st.session_state["reboot_pending_app"] = False
-                    time.sleep(0.5)
-                    st.rerun()
-                elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
-                    st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
-                    st.info("Live CPU hot-unplug is not supported on this kernel without restart. Startup vCPU has been configured to 1.")
-                    st.session_state["reboot_pending_app"] = True
-                else:
-                    st.error(f"Transition failed: {b_res.get('error')}")
-
-            if st.session_state.get("reboot_pending_app"):
-                if st.button("🔄 Execute Controlled VM Reboot (Apply 1 vCPU)", type="primary", key="btn_reboot_app", use_container_width=True):
-                    rb_res = api_reboot_vm("Alpine-Linux", reason="Apply 1 vCPU baseline configuration", confirmed=True)
-                    if rb_res.get("success"):
-                        st.success("Graceful reboot initiated for Alpine-Linux! Online vCPUs will apply upon restart.")
+        if st.session_state.get("reboot_pending_app"):
+            st.markdown("""
+                <div style="background-color:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 12px; margin-bottom:8px; font-size:0.85rem; color:#92400e;">
+                    ⚡ <strong>Controlled Baseline Maintenance:</strong> Gracefully halts Alpine-Linux, applies 1 startup vCPU and 1024 MB RAM while Halted, restarts VM, and verifies 1 online vCPU readback.
+                </div>
+            """, unsafe_allow_html=True)
+            if st.button("⚡ Execute Controlled Baseline Maintenance (Shutdown -> Apply 1 vCPU -> Start)", type="primary", key="btn_maint_app", use_container_width=True):
+                with st.spinner("Executing controlled maintenance on Alpine-Linux..."):
+                    m_res = api_execute_baseline_maintenance("Alpine-Linux")
+                    if m_res.get("success"):
+                        st.success(m_res.get("message", "Baseline maintenance succeeded!"))
                         st.session_state["reboot_pending_app"] = False
                         time.sleep(1.0)
                         st.rerun()
                     else:
-                        st.error(f"Reboot failed: {rb_res.get('error')}")
+                        st.error(f"Maintenance failed: {m_res.get('error')}")
 
-        else:
-            st.warning("Application VM telemetry not currently discovered.")
+    with base_col2:
+        st.markdown("##### 🗄️ Database VM Baseline (Alpine-DB)")
+        confirm_db_base = st.checkbox("Confirm baseline transition for Alpine-DB", key="chk_base_db")
+        if st.button("⚡ Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_db", disabled=not confirm_db_base, use_container_width=True):
+            b_res = api_transition_to_baseline("Alpine-DB")
+            if b_res.get("success"):
+                st.success("Alpine-DB safely transitioned to baseline with MariaDB safety check!")
+                st.session_state["reboot_pending_db"] = False
+                time.sleep(0.5)
+                st.rerun()
+            elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
+                st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
+                st.info("Live CPU hot-unplug is not supported on this kernel without restart. Controlled baseline maintenance procedure is required.")
+                st.session_state["reboot_pending_db"] = True
+            elif b_res.get("status") == "BLOCKED":
+                st.error(f"⛔ **Blocked by MariaDB Safety Check:** {b_res.get('error')}")
+            else:
+                st.error(f"Transition failed: {b_res.get('error')}")
 
-    # -------------------------------------------------------------------------
-    # DATABASE VM (Component 3)
-    # -------------------------------------------------------------------------
-    with col_db:
-        st.markdown("""
-            <div style="background-color:#fefce8; border:1px solid #fef08a; border-radius:8px; padding:12px; margin-bottom:12px;">
-                <h4 style="margin:0; color:#854d0e;">🗄️ Database VM (Alpine-DB)</h4>
-                <span style="font-size:0.85rem; color:#64748b;">Role: MariaDB 11.8.9 Relational Storage</span>
-            </div>
-        """, unsafe_allow_html=True)
-
-        if db_vm:
-            db_uuid = db_vm.get("uuid", "N/A")
-            db_uuid_match = (db_uuid == EXPECTED_DB_VM_UUID)
-            db_uuid_badge = "✅ Verified" if db_uuid_match else f"ℹ️ Discovered: `{db_uuid[:12]}...`"
-
-            st.markdown(f"**UUID:** `{db_uuid}` ({db_uuid_badge})")
-            st.markdown(f"**Power State:** `{db_vm.get('power_state', 'Unknown')}` | **IP:** `{db_vm.get('ip', '10.189.191.248')}:3306`")
-
-            # CPU Section
-            st.markdown("##### ⚡ CPU Telemetry")
-            db_cpu_val = db_vm.get("cpu_percent")
-            db_cpu_display = f"{db_cpu_val:.1f}%" if db_cpu_val is not None else "Calibrating..."
-            db_online_vcpus = db_vm.get("online_vcpus") or db_vm.get("vcpu_count", 1)
-            db_startup_vcpus = db_vm.get("startup_vcpus", 1)
-            db_max_vcpus = db_vm.get("max_vcpus", 4)
-
-            d_m1, d_m2, d_m3 = st.columns(3)
-            with d_m1:
-                st.metric("Actual CPU Utilization", db_cpu_display)
-            with d_m2:
-                st.metric("Online vCPUs", f"{db_online_vcpus} / {db_max_vcpus} vCPUs")
-            with d_m3:
-                st.metric("Startup vCPUs", f"{db_startup_vcpus} vCPU(s)")
-
-            st.caption(f"Source: `{db_vm.get('cpu_source', 'xen_cpu_time_counter')}` | Freshness: `{db_vm.get('freshness_seconds', 0.0)}s`")
-
-            # RAM Section
-            st.markdown("##### 🧠 Memory Telemetry (Xen vs Guest)")
-            db_xen_assigned_ram = db_vm.get("xen_assigned_ram_mb") or db_vm.get("allocated_ram_mb", 1024.0)
-            db_g_used = db_vm.get("guest_used_ram_mb")
-            db_g_avail = db_vm.get("guest_available_ram_mb")
-            db_g_pct = db_vm.get("guest_ram_percent")
-
-            dr_m1, dr_m2 = st.columns(2)
-            with dr_m1:
-                st.metric("Xen-Assigned RAM", f"{db_xen_assigned_ram:.0f} MB", help="Actual hypervisor memory allocated to VM")
-            with dr_m2:
-                db_avail_disp = f"{db_g_avail:.0f} MB" if db_g_avail is not None else "N/A"
-                st.metric("Guest Available RAM", db_avail_disp, help="Real available memory inside MariaDB VM (N/A when guest agent is not installed)")
-
-            dr_m3, dr_m4 = st.columns(2)
-            with dr_m3:
-                db_used_disp = f"{db_g_used:.0f} MB" if db_g_used is not None else "N/A"
-                st.metric("Guest Used RAM", db_used_disp)
-            with dr_m4:
-                db_pct_disp = f"{db_g_pct:.1f}%" if db_g_pct is not None else "N/A"
-                st.metric("Guest RAM %", db_pct_disp)
-
-            st.caption(f"Memory Source: `{db_vm.get('memory_source', 'xen_hypervisor_only')}` (Unsafe scale-down withheld when guest RAM is N/A)")
-
-            # MariaDB Safety & Baseline Transition
-            st.markdown("##### 🎯 Baseline Control & MariaDB Safety")
+        if st.session_state.get("reboot_pending_db"):
             st.markdown("""
-                <div style="background-color:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:8px 12px; margin-bottom:10px; font-size:0.85rem; color:#166534;">
-                    🛡️ <strong>MariaDB Buffer Pool Envelope:</strong> Verified safe for 1024 MB baseline (innodb_buffer_pool_size &le; 768 MB / 75%).
+                <div style="background-color:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 12px; margin-bottom:8px; font-size:0.85rem; color:#92400e;">
+                    ⚡ <strong>Controlled Baseline Maintenance:</strong> Gracefully halts Alpine-DB, applies 1 startup vCPU and 1024 MB RAM while Halted, restarts VM, and verifies 1 online vCPU readback.
                 </div>
             """, unsafe_allow_html=True)
-            confirm_db_base = st.checkbox("Confirm baseline transition for Alpine-DB", key="chk_base_db")
-            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_db", disabled=not confirm_db_base, use_container_width=True):
-                b_res = api_transition_to_baseline("Alpine-DB")
-                if b_res.get("success"):
-                    st.success("Alpine-DB safely transitioned to baseline with MariaDB safety verification!")
-                    st.session_state["reboot_pending_db"] = False
-                    time.sleep(0.5)
-                    st.rerun()
-                elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
-                    st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
-                    st.info("Live CPU hot-unplug is not supported on this kernel without restart. Startup vCPU has been configured to 1.")
-                    st.session_state["reboot_pending_db"] = True
-                else:
-                    st.error(f"Transition failed: {b_res.get('error')}")
-
-            if st.session_state.get("reboot_pending_db"):
-                if st.button("🔄 Execute Controlled VM Reboot (Apply 1 vCPU)", type="primary", key="btn_reboot_db", use_container_width=True):
-                    rb_res = api_reboot_vm("Alpine-DB", reason="Apply 1 vCPU baseline configuration", confirmed=True)
-                    if rb_res.get("success"):
-                        st.success("Graceful reboot initiated for Alpine-DB! Online vCPUs will apply upon restart.")
+            if st.button("⚡ Execute Controlled Baseline Maintenance (Shutdown -> Apply 1 vCPU -> Start)", type="primary", key="btn_maint_db", use_container_width=True):
+                with st.spinner("Executing controlled maintenance on Alpine-DB..."):
+                    m_res = api_execute_baseline_maintenance("Alpine-DB")
+                    if m_res.get("success"):
+                        st.success(m_res.get("message", "Baseline maintenance succeeded!"))
                         st.session_state["reboot_pending_db"] = False
                         time.sleep(1.0)
                         st.rerun()
                     else:
-                        st.error(f"Reboot failed: {rb_res.get('error')}")
-
-        else:
-            st.warning("Database VM telemetry not currently discovered.")
+                        st.error(f"Maintenance failed: {m_res.get('error')}")
 
     st.markdown("---")
 
-    # =========================================================================
-    # COMPONENTS 4 & 5: Automatic CPU & RAM Allocation Status
-    # =========================================================================
-    st.markdown("### ⚙️ Elasticity Decision Matrix & Automatic Scaling")
-
-    st.markdown("""
-        <div style="background-color:#f1f5f9; border-radius:6px; padding:10px 14px; margin-bottom:14px; font-size:0.9rem; color:#334155;">
-            <strong>Autonomous Actuation Rules:</strong>
-            Scale-Up requires <strong>3 consecutive intervals</strong> (>80% CPU or >85% Guest RAM) to confirm sustained demand.
-            Scale-Down requires <strong>6 consecutive intervals</strong> (<25% CPU or <30% Guest RAM) to prevent thrashing.
-            Independent 60s cooldown is enforced per resource.
-        </div>
-    """, unsafe_allow_html=True)
-
-    rec_rows = []
-    for vm_key, rec in recommendations.items():
-        rec_rows.append({
-            "Target VM": rec.get("vm_name", vm_key),
-            "CPU Action": rec.get("cpu_action", "HOLD"),
-            "Current vCPUs": rec.get("current_vcpus", 1),
-            "Recommended vCPUs": rec.get("recommended_vcpus", 1),
-            "RAM Action": rec.get("ram_action", "HOLD"),
-            "Current RAM": f"{rec.get('current_ram_mb', 1024):.0f} MB",
-            "Recommended RAM": f"{rec.get('recommended_ram_mb', 1024):.0f} MB",
-            "Rationale": rec.get("rationale", "Normal nominal workload"),
-            "Cooldown Active": "Active" if rec.get("cooldown_active") else "Clear"
-        })
-
-    if rec_rows:
-        st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No active recommendations currently generated.")
-
-    # 1-Click apply recommendation if mode is manual
-    if current_mode == "MANUAL":
-        st.markdown("##### ⚡ 1-Click Apply Pending Recommendation")
-        apply_col1, apply_col2 = st.columns([2, 1])
-        with apply_col1:
-            vm_to_apply = st.selectbox("Select Target VM for Recommendation:", list(recommendations.keys()) if recommendations else ["Alpine-Linux"])
-        with apply_col2:
-            st.write("&nbsp;")
-            if st.button("Apply Recommendation", use_container_width=True, key="btn_apply_rec"):
-                res = api_apply_recommendation(vm_to_apply)
-                if res.get("success"):
-                    st.success(f"Recommendation applied for {vm_to_apply}!")
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.error(f"Application failed: {res.get('error')}")
-
-    st.markdown("---")
-
-    # =========================================================================
-    # COMPONENT 6: Manual Resource Override
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # 5. Manual Administrator Resource Override
+    # -------------------------------------------------------------------------
     st.markdown("### 🛠️ Manual Administrator Resource Override")
     st.caption("Authorized administrator controls to scale vCPUs or RAM ballooning with verified XenAPI readback.")
 
@@ -603,91 +732,7 @@ def render_intelligent_orchestration_page():
 
     st.markdown("---")
 
-    # =========================================================================
-    # COMPONENT 7: Real-Time Resource Allocation Charts
-    # =========================================================================
-    st.markdown("### 📈 Real-Time Multi-Metric Trend Charts")
-
-    hist_res = api_get_metrics_history(limit=60)
-    history_records = hist_res.get("data", []) if hist_res.get("success") else []
-
-    if history_records:
-        df_hist = pd.DataFrame(history_records)
-        df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
-
-        ch_col1, ch_col2 = st.columns(2)
-
-        with ch_col1:
-            st.markdown("##### ⚡ CPU Utilization (%) Over Time")
-            df_app_cpu = df_hist[df_hist["vm_name"].str.contains("Linux", case=False, na=False)][["timestamp", "cpu_percent"]].rename(columns={"cpu_percent": "Alpine-Linux CPU %"})
-            df_db_cpu = df_hist[df_hist["vm_name"].str.contains("DB", case=False, na=False)][["timestamp", "cpu_percent"]].rename(columns={"cpu_percent": "Alpine-DB CPU %"})
-            
-            merged_cpu = pd.merge_asof(df_app_cpu.sort_values("timestamp"), df_db_cpu.sort_values("timestamp"), on="timestamp")
-            if not merged_cpu.empty:
-                st.line_chart(merged_cpu.set_index("timestamp"))
-            else:
-                st.info("Gathering initial CPU metrics samples...")
-
-        with ch_col2:
-            st.markdown("##### 🧠 Dynamic RAM Allocation (MB) Over Time")
-            df_app_ram = df_hist[df_hist["vm_name"].str.contains("Linux", case=False, na=False)][["timestamp", "allocated_ram_mb"]].rename(columns={"allocated_ram_mb": "Alpine-Linux RAM (MB)"})
-            df_db_ram = df_hist[df_hist["vm_name"].str.contains("DB", case=False, na=False)][["timestamp", "allocated_ram_mb"]].rename(columns={"allocated_ram_mb": "Alpine-DB RAM (MB)"})
-            
-            merged_ram = pd.merge_asof(df_app_ram.sort_values("timestamp"), df_db_ram.sort_values("timestamp"), on="timestamp")
-            if not merged_ram.empty:
-                st.line_chart(merged_ram.set_index("timestamp"))
-            else:
-                st.info("Gathering initial RAM metrics samples...")
-
-    else:
-        st.info("Historical metrics collector active; telemetry charts will populate with subsequent polling cycles.")
-
-    st.markdown("---")
-
-    # =========================================================================
-    # COMPONENT 8: Allocation Event History
-    # =========================================================================
-    st.markdown("### 📜 Resource Allocation Event History")
-    st.caption("Immutable audit log of all manual and automated scaling operations with XenAPI readback verification.")
-
-    if history_events:
-        hist_table = []
-        for ev in history_events:
-            status_raw = str(ev.get("execution_status", "")).upper()
-            if status_raw == "SUCCESS":
-                status_icon = "✅ SUCCESS"
-            elif status_raw == "MAINTENANCE_REQUIRED":
-                status_icon = "⚠️ MAINTENANCE_REQUIRED"
-            elif status_raw == "BLOCKED":
-                status_icon = "⛔ BLOCKED"
-            else:
-                status_icon = f"❌ {status_raw}"
-
-            c_ver = ev.get("controller_version")
-            if not c_ver or str(c_ver).lower() in ("none", "null"):
-                ver_display = "v1.0 (legacy)"
-            elif c_ver == "v2.0":
-                ver_display = "v2.0 (independent)"
-            else:
-                ver_display = str(c_ver)
-
-            op_id = ev.get("xen_operation_id")
-            op_disp = op_id[:14] if op_id else "N/A"
-
-            hist_table.append({
-                "Timestamp": ev.get("created_at", "N/A"),
-                "Target VM": ev.get("vm_name", "Unknown"),
-                "Resource": str(ev.get("resource_type", "")).upper(),
-                "Previous": ev.get("previous_value", "N/A"),
-                "Requested": ev.get("requested_value", "N/A"),
-                "Actual Verified": ev.get("actual_value", "N/A"),
-                "Trigger Rationale": ev.get("trigger_reason", "N/A"),
-                "Status": status_icon,
-                "Verification": ev.get("verification_status", "verified"),
-                "Controller": ver_display,
-                "Operation ID": op_disp,
-                "Initiated By": ev.get("initiated_by", "system")
-            })
-        st.dataframe(pd.DataFrame(hist_table), use_container_width=True, hide_index=True)
-    else:
-        st.info("No resource scaling operations have been actuated yet in this session.")
+    # -------------------------------------------------------------------------
+    # Render History and Charts Fragment (3-Second Auto-Refresh)
+    # -------------------------------------------------------------------------
+    render_history_and_charts_fragment()

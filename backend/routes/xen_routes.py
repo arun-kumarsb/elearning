@@ -21,6 +21,7 @@ from backend.services.xen_service import (
     apply_manual_ram_allocation,
     apply_pending_recommendation,
     transition_vm_to_baseline,
+    execute_baseline_maintenance_service,
     get_workload_simulator_status,
     start_cpu_workload_service,
     start_ram_workload_service,
@@ -31,6 +32,7 @@ from backend.services.xen_service import (
     start_student_load_service,
     stop_student_load_service,
     emergency_stop_student_load_service,
+    run_student_load_preflight,
     execute_simulated_student_db_query
 )
 
@@ -506,6 +508,28 @@ def xen_allocation_transition_baseline():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@xen_bp.route("/vm/baseline-maintenance", methods=["POST"])
+@admin_required
+def xen_vm_baseline_maintenance():
+    """
+    POST /api/xen/vm/baseline-maintenance
+    Administrator-approved controlled baseline maintenance procedure:
+    Gracefully halt -> configure startup 1 vCPU & 1024 MB RAM -> restart VM -> verify readback.
+    Request JSON: { "vm_name": "Alpine-Linux" }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        result = execute_baseline_maintenance_service(vm_name, initiated_by=initiated_by)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # -------------------------------------------------------------
 # Workload Simulator Endpoints
 # -------------------------------------------------------------
@@ -778,6 +802,20 @@ def xen_student_load_db_query():
         student_id = int(data.get("student_id", 1))
         res = execute_simulated_student_db_query(session_id, student_id)
         return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/student-load/preflight", methods=["GET", "POST"])
+def xen_student_load_preflight():
+    """
+    GET/POST /api/xen/student-load/preflight
+    Execute preflight authentication check to verify synthetic student login,
+    bearer token generation, and REST API access before full load execution.
+    """
+    try:
+        res = run_student_load_preflight()
+        status_code = 200 if res.get("success") else 400
+        return jsonify(res), status_code
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

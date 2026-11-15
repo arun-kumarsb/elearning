@@ -24,6 +24,7 @@ def login():
         return jsonify({
             "success": True,
             "message": "Login successful",
+            "token": user_info.get("token"),
             "user": user_info
         }), 200
     except Exception as e:

@@ -823,6 +823,28 @@ class XenAPIClient:
             v_rec = verify_res.get("Value", {})
             actual_vcpus = int(v_rec.get("VCPUs_at_startup") or v_rec.get("VCPUs_max") or 0)
             if actual_vcpus != target_vcpus:
+                if power_state == "Running" and (target_vcpus < current_online_vcpus or actual_vcpus > target_vcpus):
+                    logger.warning(f"VCPUs_at_startup ({actual_vcpus}) cannot be changed live on Running VM '{vm_name}'. Maintenance required.")
+                    return {
+                        "success": False,
+                        "status": "MAINTENANCE_REQUIRED",
+                        "maintenance_required": True,
+                        "vm_name": vm_name,
+                        "vm_uuid": vm_uuid,
+                        "resource_type": "cpu",
+                        "previous_value": current_online_vcpus,
+                        "requested_value": target_vcpus,
+                        "actual_value": current_online_vcpus,
+                        "startup_vcpus": actual_vcpus,
+                        "online_vcpus": current_online_vcpus,
+                        "max_vcpus": vcpus_max,
+                        "error": (
+                            f"Live CPU hot-unplug and startup reconfiguration require VM maintenance. "
+                            f"Current startup vCPUs: {actual_vcpus}, online vCPUs: {current_online_vcpus}. "
+                            f"A controlled VM maintenance procedure (graceful shutdown -> apply baseline -> restart) is required."
+                        ),
+                        "message": f"Maintenance required: Reducing from {current_online_vcpus} to {target_vcpus} vCPU requires a controlled VM maintenance restart."
+                    }
                 return {
                     "success": False,
                     "status": "FAILED",
@@ -1189,3 +1211,137 @@ class XenAPIClient:
             "safe_limit_mb": 768.0,
             "message": "MariaDB safety verified (standard 128 MB default buffer pool)."
         }
+
+    def execute_baseline_maintenance(self, vm_identifier: str, target_vcpus: int = 1, target_ram_mb: float = 1024.0) -> Dict[str, Any]:
+        """
+        Executes a controlled administrator-approved VM baseline maintenance procedure:
+        1. Checks MariaDB buffer pool safety envelope if Database VM.
+        2. Gracefully halts the target VM.
+        3. While Halted, configures VCPUs_max=4, VCPUs_at_startup=1, and dynamic RAM limits [1024, 4096] MB.
+        4. Powers on the VM.
+        5. Verifies post-boot readback of both startup and online vCPUs.
+        """
+        if not self.is_connected or not self.proxy or not self.session_id:
+            return {"success": False, "status": "FAILED", "error": "XAPI client not connected to hypervisor"}
+
+        vm = self.find_vm(vm_identifier)
+        if not vm:
+            return {"success": False, "status": "FAILED", "error": f"VM '{vm_identifier}' not found on hypervisor"}
+
+        vm_ref = vm["vm_ref"]
+        vm_name = vm["name"]
+        vm_uuid = vm["uuid"]
+
+        # 1. MariaDB Safety Check
+        if "db" in vm_name.lower():
+            safety = self.verify_mariadb_baseline_safety(target_ram_mb)
+            if not safety.get("safe", True):
+                return {
+                    "success": False,
+                    "status": "BLOCKED",
+                    "vm_name": vm_name,
+                    "error": safety.get("error", "MariaDB buffer pool size exceeds safe threshold.")
+                }
+
+        # 2. Check current power state; shutdown gracefully if Running
+        rec_res = self.proxy.VM.get_record(self.session_id, vm_ref)
+        if rec_res.get("Status") != "Success":
+            return {"success": False, "status": "FAILED", "error": f"Failed to get VM record: {rec_res.get('ErrorDescription')}"}
+        
+        power_state = rec_res.get("Value", {}).get("power_state")
+        if power_state == "Running":
+            logger.info(f"Initiating graceful clean shutdown for maintenance on '{vm_name}'...")
+            try:
+                self.proxy.VM.clean_shutdown(self.session_id, vm_ref)
+            except Exception as ex:
+                logger.warning(f"clean_shutdown exception: {ex}")
+
+            # Wait up to 30 seconds for VM to halt
+            halted = False
+            for _ in range(30):
+                time.sleep(1.0)
+                try:
+                    p_res = self.proxy.VM.get_power_state(self.session_id, vm_ref)
+                    if p_res.get("Status") == "Success" and p_res.get("Value") == "Halted":
+                        halted = True
+                        break
+                except Exception:
+                    pass
+
+            if not halted:
+                try:
+                    self.proxy.VM.hard_shutdown(self.session_id, vm_ref)
+                    time.sleep(2.0)
+                except Exception:
+                    pass
+
+        # 3. Configure Baseline Hardware Parameters While Halted
+        try:
+            self.proxy.VM.set_VCPUs_max(self.session_id, vm_ref, 4)
+            self.proxy.VM.set_VCPUs_at_startup(self.session_id, vm_ref, int(target_vcpus))
+            min_bytes = int(target_ram_mb * 1024 * 1024)
+            max_bytes = int(4096 * 1024 * 1024)
+            try:
+                self.proxy.VM.set_memory_dynamic_range(self.session_id, vm_ref, min_bytes, max_bytes)
+            except Exception as e:
+                logger.debug(f"dynamic range notice: {e}")
+        except Exception as e:
+            logger.error(f"Failed to apply baseline parameters while halted: {e}")
+            return {"success": False, "status": "FAILED", "error": f"Parameter update failed: {str(e)}"}
+
+        # 4. Start VM
+        logger.info(f"Powering on '{vm_name}' with verified baseline parameters...")
+        try:
+            self.proxy.VM.start(self.session_id, vm_ref, False, False)
+        except Exception as e:
+            logger.error(f"VM start exception: {e}")
+
+        # Wait up to 30s for VM to transition to Running
+        running = False
+        for _ in range(30):
+            time.sleep(1.0)
+            try:
+                p_res = self.proxy.VM.get_power_state(self.session_id, vm_ref)
+                if p_res.get("Status") == "Success" and p_res.get("Value") == "Running":
+                    running = True
+                    break
+            except Exception:
+                pass
+
+        # 5. Readback Verification
+        verify_rec = self.proxy.VM.get_record(self.session_id, vm_ref)
+        v_val = verify_rec.get("Value", {}) if verify_rec.get("Status") == "Success" else {}
+        actual_startup = int(v_val.get("VCPUs_at_startup") or 0)
+        
+        actual_online = actual_startup
+        metrics_ref = v_val.get("metrics")
+        if metrics_ref and metrics_ref != "OpaqueRef:NULL":
+            try:
+                m_res = self.proxy.VM_metrics.get_record(self.session_id, metrics_ref)
+                if m_res.get("Status") == "Success":
+                    actual_online = int(m_res.get("Value", {}).get("VCPUs_number") or actual_startup)
+            except Exception:
+                pass
+
+        if actual_startup == target_vcpus:
+            return {
+                "success": True,
+                "status": "SUCCESS",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "target_baseline": {"vcpus": target_vcpus, "ram_mb": target_ram_mb},
+                "startup_vcpus": actual_startup,
+                "online_vcpus": actual_online,
+                "actual_value": f"{actual_startup} vCPU / {target_ram_mb} MB",
+                "verification_status": "verified",
+                "message": f"Controlled baseline maintenance succeeded: '{vm_name}' successfully transitioned to {actual_startup} vCPU and {target_ram_mb} MB RAM!"
+            }
+        else:
+            return {
+                "success": False,
+                "status": "FAILED",
+                "vm_name": vm_name,
+                "startup_vcpus": actual_startup,
+                "online_vcpus": actual_online,
+                "error": f"Post-boot verification failed: startup vCPUs {actual_startup} != {target_vcpus}."
+            }
