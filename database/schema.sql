@@ -141,6 +141,9 @@ CREATE TABLE IF NOT EXISTS resource_allocation_history (
     execution_status VARCHAR(20) NOT NULL DEFAULT 'SUCCESS',
     error_message TEXT NULL,
     initiated_by VARCHAR(100) NOT NULL DEFAULT 'system',
+    controller_version VARCHAR(20) NOT NULL DEFAULT 'v2.0',
+    xen_operation_id VARCHAR(64) NULL,
+    verification_status VARCHAR(30) NOT NULL DEFAULT 'verified',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_alloc_vm_time (vm_name, created_at),
     INDEX idx_alloc_status (execution_status)

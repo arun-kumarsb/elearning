@@ -7,6 +7,7 @@ intelligent elasticity evaluation, and safe dynamic resource actuation.
 import time
 import os
 import sys
+import uuid
 import threading
 import logging
 from typing import Dict, Any, List, Optional
@@ -37,6 +38,10 @@ class XenResourceMonitor:
         self.normalizer = MetricsNormalizer(self.network_monitor)
         self.allocation_engine = AllocationEngine(self.config)
 
+        # Independent allocation locks for CPU and RAM
+        self._cpu_allocation_lock = threading.Lock()
+        self._ram_allocation_lock = threading.Lock()
+
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -46,6 +51,9 @@ class XenResourceMonitor:
         self.consecutive_failures: int = 0
         self.last_error: Optional[str] = None
         self.last_xen_operation: Optional[Dict[str, Any]] = None
+
+        # Check persisted emergency stop status from DB
+        self._check_persisted_emergency_stop()
 
         # Cached latest snapshot
         self._latest_state: Dict[str, Any] = {
@@ -59,6 +67,22 @@ class XenResourceMonitor:
             "last_xen_operation": None,
             "error": None
         }
+
+    def _check_persisted_emergency_stop(self):
+        """Check if emergency stop was engaged in a previous run and restore it."""
+        try:
+            rows = query_db(
+                """
+                SELECT action_type, execution_status FROM resource_allocation_history
+                WHERE action_type IN ('emergency_stop', 'emergency_stop_reset')
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """
+            )
+            if rows and rows[0]["action_type"] == "emergency_stop" and rows[0]["execution_status"] in ("engaged", "ENGAGED"):
+                self.allocation_engine.set_emergency_stop(True)
+                logger.warning("Restored active EMERGENCY STOP state from database audit history.")
+        except Exception as e:
+            logger.debug(f"Could not restore emergency stop state from DB: {e}")
 
     @classmethod
     def get_instance(cls, config: Optional[MonitorConfig] = None):
@@ -76,10 +100,11 @@ class XenResourceMonitor:
             return clean_mode
         raise ValueError(f"Invalid allocation mode '{mode}'. Must be 'manual' or 'auto'.")
 
-    def set_emergency_stop(self, enabled: bool) -> bool:
+    def set_emergency_stop(self, enabled: bool, reason: str = "Administrator emergency stop", initiated_by: str = "admin") -> bool:
         """Toggle emergency stop status and halt any active synthetic workloads and student load simulations."""
-        self.allocation_engine.set_emergency_stop(enabled)
         if enabled:
+            self.allocation_engine.set_emergency_stop(True)
+            self.config.allocation_mode = "manual"
             try:
                 from backend.services.workload_service import WorkloadSimulatorService
                 WorkloadSimulatorService.get_instance().stop_all_workloads()
@@ -90,7 +115,42 @@ class XenResourceMonitor:
                 StudentLoadSimulatorService.get_instance().emergency_stop_all()
             except Exception as e:
                 logger.warning(f"Failed to stop student load simulations during emergency stop: {e}")
-        return self.allocation_engine.emergency_stop
+            self._persist_allocation_action({
+                "vm_name": "Hypervisor",
+                "vm_uuid": None,
+                "resource_type": "all",
+                "previous_value": 0.0,
+                "requested_value": 0.0,
+                "actual_value": 0.0,
+                "trigger_reason": reason,
+                "action_type": "emergency_stop",
+                "execution_status": "engaged",
+                "initiated_by": initiated_by,
+                "verification_status": "verified"
+            })
+            return True
+        else:
+            return self.reset_emergency_stop(reason=reason, initiated_by=initiated_by)
+
+    def reset_emergency_stop(self, reason: str = "Administrator reset", initiated_by: str = "admin") -> bool:
+        """Explicitly reset emergency stop, return operational mode to manual, and record audit log."""
+        self.allocation_engine.set_emergency_stop(False)
+        self.config.allocation_mode = "manual"
+        self._persist_allocation_action({
+            "vm_name": "Hypervisor",
+            "vm_uuid": None,
+            "resource_type": "all",
+            "previous_value": 0.0,
+            "requested_value": 0.0,
+            "actual_value": 0.0,
+            "trigger_reason": f"Emergency stop cleared by administrator. Reason: {reason}",
+            "action_type": "emergency_stop_reset",
+            "execution_status": "success",
+            "initiated_by": initiated_by,
+            "verification_status": "verified"
+        })
+        logger.warning(f"EMERGENCY STOP explicitly reset by {initiated_by}. Mode returned to MANUAL.")
+        return False
 
     def start(self):
         """Start the background monitoring thread."""
@@ -361,11 +421,15 @@ class XenResourceMonitor:
     # -----------------------------------------------------------------
     def apply_manual_cpu(self, vm_identifier: str, target_vcpus: int, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
         """Manually actuate vCPU modification via XenAPI and record audit log."""
+        if self.allocation_engine.emergency_stop:
+            return {"success": False, "error": "Emergency Stop is active. Manual scaling blocked."}
+
         with self._allocation_lock:
             res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
             vm_name = res.get("vm_name") or vm_identifier
             vm_uuid = res.get("vm_uuid")
-            status = "success" if res.get("success") else "failed"
+            res_status = res.get("status", "SUCCESS" if res.get("success") else "FAILED")
+            status = "maintenance_required" if res_status == "MAINTENANCE_REQUIRED" else ("success" if res.get("success") else "failed")
 
             if status == "success":
                 self.allocation_engine.record_action_applied(vm_name, "cpu")
@@ -391,12 +455,17 @@ class XenResourceMonitor:
                 "action_type": "manual_cpu",
                 "execution_status": status,
                 "error_message": res.get("error"),
-                "initiated_by": initiated_by
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if status == "success" else ("maintenance_required" if status == "maintenance_required" else "failed")
             })
             return res
 
     def apply_manual_ram(self, vm_identifier: str, target_ram_mb: float, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
         """Manually actuate dynamic memory ballooning via XenAPI and record audit log."""
+        if self.allocation_engine.emergency_stop:
+            return {"success": False, "error": "Emergency Stop is active. Manual scaling blocked."}
+
         with self._allocation_lock:
             res = self.client.set_vm_dynamic_memory(vm_identifier, target_ram_mb)
             vm_name = res.get("vm_name") or vm_identifier
@@ -427,25 +496,87 @@ class XenResourceMonitor:
                 "action_type": "manual_ram",
                 "execution_status": status,
                 "error_message": res.get("error"),
-                "initiated_by": initiated_by
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if status == "success" else "failed"
             })
             return res
+
+    def reboot_vm(self, vm_identifier: str, reason: str = "Admin requested reboot", initiated_by: str = "admin") -> Dict[str, Any]:
+        """Perform graceful VM reboot via XenAPI with audit logging."""
+        res = self.client.clean_reboot_vm(vm_identifier)
+        status = "success" if res.get("success") else "failed"
+        self._persist_allocation_action({
+            "vm_name": res.get("vm_name") or vm_identifier,
+            "resource_type": "vm",
+            "previous_value": 0.0,
+            "requested_value": 0.0,
+            "actual_value": 0.0,
+            "trigger_reason": reason,
+            "action_type": "vm_reboot",
+            "execution_status": status,
+            "error_message": res.get("error"),
+            "initiated_by": initiated_by,
+            "controller_version": "v2.0",
+            "verification_status": "verified" if status == "success" else "failed"
+        })
+        return res
 
     def transition_to_baseline(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
         """
         Safely transitions a VM from current configuration to baseline policy (1 vCPU, 1024 MB RAM)
-        with host verification and audit logging.
+        with host verification, MariaDB buffer pool safety check, and audit logging.
         """
+        if self.allocation_engine.emergency_stop:
+            return {
+                "success": False,
+                "status": "BLOCKED",
+                "vm_name": vm_identifier,
+                "error": "Emergency Stop is active. Baseline transition blocked."
+            }
+
         with self._allocation_lock:
             policy = self.config.get_vm_policy(vm_identifier)
             target_vcpus = policy.get("initial_vcpus", 1)
             target_ram_mb = policy.get("initial_ram_mb", 1024.0)
 
+            # Check MariaDB buffer pool safety for database VM before scaling RAM
+            if "db" in vm_identifier.lower():
+                safety = self.client.verify_mariadb_baseline_safety(target_ram_mb)
+                if not safety.get("safe", True):
+                    err = safety.get("error", "MariaDB buffer pool size unsafe for 1024 MB baseline.")
+                    logger.warning(f"MariaDB safety check blocked baseline transition on {vm_identifier}: {err}")
+                    self._persist_allocation_action({
+                        "vm_name": vm_identifier,
+                        "resource_type": "ram",
+                        "previous_value": target_ram_mb,
+                        "requested_value": target_ram_mb,
+                        "actual_value": target_ram_mb,
+                        "trigger_reason": f"MariaDB safety check blocked baseline: {err}",
+                        "action_type": "baseline_transition",
+                        "execution_status": "blocked",
+                        "error_message": err,
+                        "initiated_by": initiated_by,
+                        "controller_version": "v2.0",
+                        "verification_status": "blocked"
+                    })
+                    return {
+                        "success": False,
+                        "status": "BLOCKED",
+                        "vm_name": vm_identifier,
+                        "target_baseline": {"vcpus": target_vcpus, "ram_mb": target_ram_mb},
+                        "error": err,
+                        "mariadb_safety": safety,
+                        "message": f"Baseline transition blocked by MariaDB safety check: {err}"
+                    }
+
             # 1. vCPU Transition
             cpu_res = self.client.set_vm_vcpus(vm_identifier, target_vcpus)
             cpu_ok = cpu_res.get("success", False)
+            cpu_status = cpu_res.get("status", "SUCCESS" if cpu_ok else "FAILED")
             if cpu_ok:
                 self.allocation_engine.record_action_applied(vm_identifier, "cpu")
+
             self._persist_allocation_action({
                 "vm_name": vm_identifier,
                 "vm_uuid": cpu_res.get("vm_uuid"),
@@ -455,9 +586,11 @@ class XenResourceMonitor:
                 "actual_value": cpu_res.get("actual_value"),
                 "trigger_reason": "Baseline transition approved by administrator",
                 "action_type": "baseline_transition",
-                "execution_status": "success" if cpu_ok else "failed",
+                "execution_status": cpu_status.lower(),
                 "error_message": cpu_res.get("error"),
-                "initiated_by": initiated_by
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if cpu_ok else ("maintenance_required" if cpu_status == "MAINTENANCE_REQUIRED" else "failed")
             })
 
             # 2. RAM Transition
@@ -476,10 +609,29 @@ class XenResourceMonitor:
                 "action_type": "baseline_transition",
                 "execution_status": "success" if ram_ok else "failed",
                 "error_message": ram_res.get("error"),
-                "initiated_by": initiated_by
+                "initiated_by": initiated_by,
+                "controller_version": "v2.0",
+                "verification_status": "verified" if ram_ok else "failed"
             })
 
-            all_ok = cpu_ok and ram_ok
+            if cpu_status == "MAINTENANCE_REQUIRED":
+                overall_status = "MAINTENANCE_REQUIRED"
+                all_ok = False
+                msg = (
+                    f"Baseline transition for '{vm_identifier}' requires maintenance: "
+                    f"Startup vCPUs configured to {target_vcpus}, RAM set to {target_ram_mb} MB. "
+                    f"Live CPU hot-unplug is unsupported by running guest kernel (online: {cpu_res.get('actual_value')}). "
+                    f"A controlled VM restart is required to achieve {target_vcpus} online vCPU."
+                )
+            elif cpu_ok and ram_ok:
+                overall_status = "SUCCESS"
+                all_ok = True
+                msg = f"Successfully transitioned '{vm_identifier}' to baseline ({target_vcpus} vCPU, {target_ram_mb} MB RAM)!"
+            else:
+                overall_status = "FAILED"
+                all_ok = False
+                msg = f"Baseline transition incomplete: CPU ({cpu_res.get('error') or 'OK'}), RAM ({ram_res.get('error') or 'OK'})."
+
             if all_ok:
                 self.last_xen_operation = {
                     "timestamp": time.time(),
@@ -494,11 +646,12 @@ class XenResourceMonitor:
 
             return {
                 "success": all_ok,
+                "status": overall_status,
                 "vm_name": vm_identifier,
                 "target_baseline": {"vcpus": target_vcpus, "ram_mb": target_ram_mb},
                 "cpu_result": cpu_res,
                 "ram_result": ram_res,
-                "message": f"Successfully transitioned '{vm_identifier}' to baseline ({target_vcpus} vCPU, {target_ram_mb} MB RAM)!" if all_ok else f"Baseline transition incomplete: CPU ({cpu_res.get('error') or 'OK'}), RAM ({ram_res.get('error') or 'OK'})."
+                "message": msg
             }
 
     def apply_recommended_action(self, vm_identifier: str, initiated_by: str = "admin") -> Dict[str, Any]:
@@ -555,12 +708,43 @@ class XenResourceMonitor:
             sql = """
                 INSERT INTO resource_allocation_history
                 (vm_name, vm_uuid, resource_type, previous_value, requested_value, actual_value,
-                 trigger_reason, action_type, execution_status, error_message, initiated_by)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 trigger_reason, action_type, execution_status, error_message, initiated_by,
+                 controller_version, xen_operation_id, verification_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            prev_val = float(action.get("previous_value") or 0.0)
-            req_val = float(action.get("requested_value") or 0.0)
-            act_val = float(action.get("actual_value") or 0.0)
+            prev_val = float(action.get("previous_value") if action.get("previous_value") is not None else 0.0)
+            req_val = float(action.get("requested_value") if action.get("requested_value") is not None else 0.0)
+
+            # Never default actual_value to 0.0 when failed! Fallback to previous_value
+            if action.get("actual_value") is not None:
+                act_val = float(action.get("actual_value"))
+            elif action.get("previous_value") is not None:
+                act_val = float(action.get("previous_value"))
+            else:
+                act_val = 0.0
+
+            err_msg = action.get("error_message") or action.get("error")
+            raw_status = action.get("execution_status")
+            if raw_status:
+                exec_status = raw_status.lower() if str(raw_status).lower() in ("success", "failed") else raw_status
+            else:
+                exec_status = "success"
+
+            # If error message exists and status was SUCCESS/success, fix to failed
+            if err_msg and str(exec_status).lower() == "success":
+                exec_status = "failed"
+
+            # If status claimed as SUCCESS but value didn't change when a change was requested
+            if str(exec_status).lower() == "success" and abs(req_val - prev_val) > 0.001 and abs(act_val - req_val) > 0.001:
+                exec_status = "failed"
+                err_msg = err_msg or f"Verification failed: actual allocation ({act_val}) did not reach requested ({req_val})"
+
+            controller_ver = action.get("controller_version", "v2.0")
+            xen_op_id = action.get("xen_operation_id") or f"xen-op-{uuid.uuid4().hex[:10]}"
+            verif_status = action.get("verification_status")
+            if not verif_status:
+                verif_status = "verified" if str(exec_status).lower() == "success" else ("maintenance_required" if str(exec_status).upper() == "MAINTENANCE_REQUIRED" else "failed")
+
             execute_db(sql, (
                 action.get("vm_name"),
                 action.get("vm_uuid"),
@@ -570,11 +754,14 @@ class XenResourceMonitor:
                 act_val,
                 action.get("trigger_reason"),
                 action.get("action_type", "auto_scale"),
-                action.get("execution_status", "success"),
-                action.get("error_message"),
-                action.get("initiated_by", "system")
+                exec_status,
+                err_msg,
+                action.get("initiated_by", "system"),
+                controller_ver,
+                xen_op_id,
+                verif_status
             ))
-            logger.info(f"Persisted allocation audit log: {action.get('action_type')} on {action.get('vm_name')} ({action.get('execution_status')})")
+            logger.info(f"Persisted allocation audit log: {action.get('action_type')} on {action.get('vm_name')} ({exec_status})")
         except Exception as e:
             logger.warning(f"Failed to persist allocation action audit log: {e}")
 
@@ -767,27 +954,27 @@ class XenResourceMonitor:
         return state.get("recommendations", {})
 
     def get_allocation_history(self, vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Query allocation history from resource_allocation_history table."""
+        """Query allocation history from resource_allocation_history table with controller versioning."""
         try:
             safe_limit = min(200, max(1, int(limit)))
+            cols = """id, vm_name, vm_uuid, resource_type, previous_value, requested_value,
+                   actual_value, trigger_reason, action_type, execution_status,
+                   error_message, initiated_by, created_at,
+                   controller_version, xen_operation_id, verification_status"""
             if vm_name:
                 sql = f"""
-                    SELECT id, vm_name, vm_uuid, resource_type, previous_value, requested_value,
-                           actual_value, trigger_reason, action_type, execution_status,
-                           error_message, initiated_by, created_at
+                    SELECT {cols}
                     FROM resource_allocation_history
                     WHERE LOWER(vm_name) = LOWER(%s)
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, id DESC
                     LIMIT {safe_limit}
                 """
                 rows = query_db(sql, (vm_name,))
             else:
                 sql = f"""
-                    SELECT id, vm_name, vm_uuid, resource_type, previous_value, requested_value,
-                           actual_value, trigger_reason, action_type, execution_status,
-                           error_message, initiated_by, created_at
+                    SELECT {cols}
                     FROM resource_allocation_history
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, id DESC
                     LIMIT {safe_limit}
                 """
                 rows = query_db(sql)
@@ -800,6 +987,8 @@ class XenResourceMonitor:
                 row_dict = dict(r)
                 if row_dict.get("created_at"):
                     row_dict["created_at"] = str(row_dict["created_at"])
+                if not row_dict.get("controller_version"):
+                    row_dict["controller_version"] = "legacy"
                 formatted.append(row_dict)
             return formatted
         except Exception as e:

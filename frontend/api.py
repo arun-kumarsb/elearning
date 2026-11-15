@@ -229,6 +229,19 @@ def api_set_allocation_mode(mode: str) -> Dict[str, Any]:
 def api_emergency_stop(action: str = "engage") -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/emergency-stop", {"action": action})
 
+def api_reset_emergency_stop(reason: str = "Admin inspected system nominal", confirmed: bool = True) -> Dict[str, Any]:
+    return safe_request("POST", "xen/allocation/emergency-stop/reset", {
+        "confirmed": confirmed,
+        "reason": reason
+    })
+
+def api_reboot_vm(vm_name: str, reason: str = "Apply baseline configuration", confirmed: bool = True) -> Dict[str, Any]:
+    return safe_request("POST", "xen/vm/reboot", {
+        "vm_name": vm_name,
+        "confirmed": confirmed,
+        "reason": reason
+    })
+
 def api_apply_manual_cpu(vm_name: str, vcpus: int, reason: str = "Administrator manual adjustment") -> Dict[str, Any]:
     return safe_request("POST", "xen/allocation/cpu", {
         "vm_name": vm_name,

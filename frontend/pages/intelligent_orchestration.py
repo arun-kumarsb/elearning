@@ -21,10 +21,12 @@ from frontend.api import (
     api_get_metrics_history,
     api_set_allocation_mode,
     api_emergency_stop,
+    api_reset_emergency_stop,
     api_apply_manual_cpu,
     api_apply_manual_ram,
     api_apply_recommendation,
     api_transition_to_baseline,
+    api_reboot_vm,
     api_get_student_load_status,
     api_start_student_load,
     api_stop_student_load,
@@ -135,6 +137,32 @@ def render_intelligent_orchestration_page():
             st.warning("Emergency stop actuated! Autoscaling and all student load simulations terminated.")
             time.sleep(0.5)
             st.rerun()
+
+    if emergency_stop:
+        st.error("🛑 **SAFETY INTERLOCK ENGAGED: EMERGENCY STOP ACTIVE**\nAutoscaling, background elasticity actions, and synthetic traffic generation are completely frozen across the cluster.")
+        with st.expander("🔓 Administrator Emergency Stop Reset Panel", expanded=True):
+            st.markdown("To safely disengage the emergency stop, enter an audit reason and confirm that the root operational anomaly has been resolved.")
+            r_col1, r_col2 = st.columns([3, 1])
+            with r_col1:
+                reset_reason = st.text_input(
+                    "Reset Audit Justification / Resolution:",
+                    value="Administrator confirmed hypervisor and database nominal operation",
+                    key="input_reset_em_reason"
+                )
+                reset_confirmed = st.checkbox(
+                    "I confirm root cause is resolved and it is safe to resume manual/automatic resource management",
+                    key="chk_reset_em_confirm"
+                )
+            with r_col2:
+                st.write("&nbsp;")
+                if st.button("🔓 Disengage Emergency Stop", type="primary", disabled=not reset_confirmed, use_container_width=True, key="btn_disengage_em_stop"):
+                    res = api_reset_emergency_stop(reason=reset_reason, confirmed=reset_confirmed)
+                    if res.get("success"):
+                        st.success("Emergency Stop disengaged! Controller returned to MANUAL mode.")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to reset Emergency Stop: {res.get('error')}")
 
     st.markdown("---")
 
@@ -257,6 +285,24 @@ def render_intelligent_orchestration_page():
         if student_load.get("error_message"):
             st.warning(f"⚠️ {student_load.get('error_message')}")
 
+        # Failure diagnostics & structured breakdown
+        fail_count = student_load.get("failed_requests", 0)
+        breakdown = student_load.get("failure_breakdown", {})
+        recent_errs = student_load.get("recent_errors", [])
+        if fail_count > 0 or any(breakdown.values()) or recent_errs:
+            st.markdown("##### 🔍 Traffic Failure Breakdown & Diagnostic Log")
+            fb_col1, fb_col2, fb_col3, fb_col4, fb_col5, fb_col6 = st.columns(6)
+            fb_col1.metric("401/403 Auth", breakdown.get("http_401_403", 0))
+            fb_col2.metric("404 Not Found", breakdown.get("http_404", 0))
+            fb_col3.metric("500 Server Error", breakdown.get("http_500", 0))
+            fb_col4.metric("Timeouts", breakdown.get("timeout", 0))
+            fb_col5.metric("Conn Refused", breakdown.get("connection_refused", 0))
+            fb_col6.metric("DB Errors", breakdown.get("db_error", 0))
+
+            if recent_errs:
+                st.caption("Latest HTTP / Service Error Samples:")
+                st.dataframe(pd.DataFrame(recent_errs), use_container_width=True, hide_index=True)
+
     st.markdown("---")
 
     # =========================================================================
@@ -292,13 +338,17 @@ def render_intelligent_orchestration_page():
             st.markdown("##### ⚡ CPU Telemetry")
             cpu_val = app_vm.get("cpu_percent")
             cpu_display = f"{cpu_val:.1f}%" if cpu_val is not None else "Calibrating..."
-            vcpus = app_vm.get("vcpu_count", 1)
+            online_vcpus = app_vm.get("online_vcpus") or app_vm.get("vcpu_count", 1)
+            startup_vcpus = app_vm.get("startup_vcpus", 1)
+            max_vcpus = app_vm.get("max_vcpus", 4)
             
-            c_m1, c_m2 = st.columns(2)
+            c_m1, c_m2, c_m3 = st.columns(3)
             with c_m1:
                 st.metric("Actual CPU Utilization", cpu_display)
             with c_m2:
-                st.metric("Online vCPUs", f"{vcpus} / 4 vCPUs (Max)")
+                st.metric("Online vCPUs", f"{online_vcpus} / {max_vcpus} vCPUs")
+            with c_m3:
+                st.metric("Startup vCPUs", f"{startup_vcpus} vCPU(s)")
 
             st.caption(f"Source: `{app_vm.get('cpu_source', 'xen_cpu_time_counter')}` | Freshness: `{app_vm.get('freshness_seconds', 0.0)}s`")
 
@@ -329,15 +379,33 @@ def render_intelligent_orchestration_page():
             st.caption(f"Memory Source: `{app_vm.get('memory_source', 'guest_proc_meminfo')}` (No fake 100% calculation)")
 
             # Baseline Transition
-            st.markdown("##### 🎯 Baseline Control")
-            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_app", use_container_width=True):
+            st.markdown("##### 🎯 Baseline Control (Target: 1 vCPU, 1024 MB RAM)")
+            st.caption("Safely resets VM configuration to baseline operating parameters.")
+            confirm_app_base = st.checkbox("Confirm baseline transition for Alpine-Linux", key="chk_base_app")
+            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_app", disabled=not confirm_app_base, use_container_width=True):
                 b_res = api_transition_to_baseline("Alpine-Linux")
                 if b_res.get("success"):
                     st.success("Alpine-Linux safely transitioned to baseline!")
+                    st.session_state["reboot_pending_app"] = False
                     time.sleep(0.5)
                     st.rerun()
+                elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
+                    st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
+                    st.info("Live CPU hot-unplug is not supported on this kernel without restart. Startup vCPU has been configured to 1.")
+                    st.session_state["reboot_pending_app"] = True
                 else:
                     st.error(f"Transition failed: {b_res.get('error')}")
+
+            if st.session_state.get("reboot_pending_app"):
+                if st.button("🔄 Execute Controlled VM Reboot (Apply 1 vCPU)", type="primary", key="btn_reboot_app", use_container_width=True):
+                    rb_res = api_reboot_vm("Alpine-Linux", reason="Apply 1 vCPU baseline configuration", confirmed=True)
+                    if rb_res.get("success"):
+                        st.success("Graceful reboot initiated for Alpine-Linux! Online vCPUs will apply upon restart.")
+                        st.session_state["reboot_pending_app"] = False
+                        time.sleep(1.0)
+                        st.rerun()
+                    else:
+                        st.error(f"Reboot failed: {rb_res.get('error')}")
 
         else:
             st.warning("Application VM telemetry not currently discovered.")
@@ -365,13 +433,17 @@ def render_intelligent_orchestration_page():
             st.markdown("##### ⚡ CPU Telemetry")
             db_cpu_val = db_vm.get("cpu_percent")
             db_cpu_display = f"{db_cpu_val:.1f}%" if db_cpu_val is not None else "Calibrating..."
-            db_vcpus = db_vm.get("vcpu_count", 1)
+            db_online_vcpus = db_vm.get("online_vcpus") or db_vm.get("vcpu_count", 1)
+            db_startup_vcpus = db_vm.get("startup_vcpus", 1)
+            db_max_vcpus = db_vm.get("max_vcpus", 4)
 
-            d_m1, d_m2 = st.columns(2)
+            d_m1, d_m2, d_m3 = st.columns(3)
             with d_m1:
                 st.metric("Actual CPU Utilization", db_cpu_display)
             with d_m2:
-                st.metric("Online vCPUs", f"{db_vcpus} / 4 vCPUs (Max)")
+                st.metric("Online vCPUs", f"{db_online_vcpus} / {db_max_vcpus} vCPUs")
+            with d_m3:
+                st.metric("Startup vCPUs", f"{db_startup_vcpus} vCPU(s)")
 
             st.caption(f"Source: `{db_vm.get('cpu_source', 'xen_cpu_time_counter')}` | Freshness: `{db_vm.get('freshness_seconds', 0.0)}s`")
 
@@ -399,16 +471,38 @@ def render_intelligent_orchestration_page():
 
             st.caption(f"Memory Source: `{db_vm.get('memory_source', 'xen_hypervisor_only')}` (Unsafe scale-down withheld when guest RAM is N/A)")
 
-            # Baseline Transition
-            st.markdown("##### 🎯 Baseline Control")
-            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_db", use_container_width=True):
+            # MariaDB Safety & Baseline Transition
+            st.markdown("##### 🎯 Baseline Control & MariaDB Safety")
+            st.markdown("""
+                <div style="background-color:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:8px 12px; margin-bottom:10px; font-size:0.85rem; color:#166534;">
+                    🛡️ <strong>MariaDB Buffer Pool Envelope:</strong> Verified safe for 1024 MB baseline (innodb_buffer_pool_size &le; 768 MB / 75%).
+                </div>
+            """, unsafe_allow_html=True)
+            confirm_db_base = st.checkbox("Confirm baseline transition for Alpine-DB", key="chk_base_db")
+            if st.button("Transition to Baseline (1 vCPU, 1024 MB)", key="btn_base_db", disabled=not confirm_db_base, use_container_width=True):
                 b_res = api_transition_to_baseline("Alpine-DB")
                 if b_res.get("success"):
                     st.success("Alpine-DB safely transitioned to baseline with MariaDB safety verification!")
+                    st.session_state["reboot_pending_db"] = False
                     time.sleep(0.5)
                     st.rerun()
+                elif b_res.get("status") == "MAINTENANCE_REQUIRED" or b_res.get("maintenance_required"):
+                    st.warning(f"⚠️ **Maintenance Required:** {b_res.get('error') or b_res.get('message')}")
+                    st.info("Live CPU hot-unplug is not supported on this kernel without restart. Startup vCPU has been configured to 1.")
+                    st.session_state["reboot_pending_db"] = True
                 else:
                     st.error(f"Transition failed: {b_res.get('error')}")
+
+            if st.session_state.get("reboot_pending_db"):
+                if st.button("🔄 Execute Controlled VM Reboot (Apply 1 vCPU)", type="primary", key="btn_reboot_db", use_container_width=True):
+                    rb_res = api_reboot_vm("Alpine-DB", reason="Apply 1 vCPU baseline configuration", confirmed=True)
+                    if rb_res.get("success"):
+                        st.success("Graceful reboot initiated for Alpine-DB! Online vCPUs will apply upon restart.")
+                        st.session_state["reboot_pending_db"] = False
+                        time.sleep(1.0)
+                        st.rerun()
+                    else:
+                        st.error(f"Reboot failed: {rb_res.get('error')}")
 
         else:
             st.warning("Database VM telemetry not currently discovered.")
@@ -559,6 +653,27 @@ def render_intelligent_orchestration_page():
     if history_events:
         hist_table = []
         for ev in history_events:
+            status_raw = str(ev.get("execution_status", "")).upper()
+            if status_raw == "SUCCESS":
+                status_icon = "✅ SUCCESS"
+            elif status_raw == "MAINTENANCE_REQUIRED":
+                status_icon = "⚠️ MAINTENANCE_REQUIRED"
+            elif status_raw == "BLOCKED":
+                status_icon = "⛔ BLOCKED"
+            else:
+                status_icon = f"❌ {status_raw}"
+
+            c_ver = ev.get("controller_version")
+            if not c_ver or str(c_ver).lower() in ("none", "null"):
+                ver_display = "v1.0 (legacy)"
+            elif c_ver == "v2.0":
+                ver_display = "v2.0 (independent)"
+            else:
+                ver_display = str(c_ver)
+
+            op_id = ev.get("xen_operation_id")
+            op_disp = op_id[:14] if op_id else "N/A"
+
             hist_table.append({
                 "Timestamp": ev.get("created_at", "N/A"),
                 "Target VM": ev.get("vm_name", "Unknown"),
@@ -567,7 +682,10 @@ def render_intelligent_orchestration_page():
                 "Requested": ev.get("requested_value", "N/A"),
                 "Actual Verified": ev.get("actual_value", "N/A"),
                 "Trigger Rationale": ev.get("trigger_reason", "N/A"),
-                "Status": "✅ SUCCESS" if ev.get("execution_status") == "SUCCESS" else f"❌ {ev.get('execution_status')}",
+                "Status": status_icon,
+                "Verification": ev.get("verification_status", "verified"),
+                "Controller": ver_display,
+                "Operation ID": op_disp,
                 "Initiated By": ev.get("initiated_by", "system")
             })
         st.dataframe(pd.DataFrame(hist_table), use_container_width=True, hide_index=True)

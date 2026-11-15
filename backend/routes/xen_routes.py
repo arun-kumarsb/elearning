@@ -15,6 +15,8 @@ from backend.services.xen_service import (
     get_allocation_history,
     set_automation_mode,
     set_emergency_stop_status,
+    reset_emergency_stop_status,
+    reboot_vm_service,
     apply_manual_cpu_allocation,
     apply_manual_ram_allocation,
     apply_pending_recommendation,
@@ -333,13 +335,69 @@ def xen_allocation_emergency_stop():
     try:
         body = request.get_json(silent=True) or {}
         action = body.get("action", "engage").lower().strip()
-        enabled = False if action in ("resume", "disengage", "false", "off") else True
-        new_state = set_emergency_stop_status(enabled)
+        initiated_by = request.user.get("email", "admin")
+        enabled = False if action in ("resume", "disengage", "false", "off", "reset") else True
+        if enabled:
+            new_state = set_emergency_stop_status(True, reason="Administrator emergency stop", initiated_by=initiated_by)
+        else:
+            new_state = reset_emergency_stop_status(reason="Administrator emergency stop disengaged", initiated_by=initiated_by)
         return jsonify({
             "success": True,
             "emergency_stop": new_state,
-            "message": "Emergency stop ENGAGED. Automated scaling blocked." if new_state else "Emergency stop DISENGAGED. Normal operations resumed."
+            "message": "Emergency stop ENGAGED. Automated scaling and synthetic load suspended." if new_state else "Emergency stop DISENGAGED. Mode returned to MANUAL."
         }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/allocation/emergency-stop/reset", methods=["POST"])
+@admin_required
+def xen_allocation_emergency_stop_reset():
+    """
+    POST /api/xen/allocation/emergency-stop/reset
+    Explicit administrator reset of emergency stop with required reason and confirmation.
+    Request JSON: { "confirmed": true, "reason": "System nominal" }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        confirmed = body.get("confirmed", False)
+        reason = body.get("reason", "").strip() or "Administrator inspected system and verified nominal state"
+        if not confirmed:
+            return jsonify({"success": False, "error": "Confirmation is required to reset emergency stop."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        reset_emergency_stop_status(reason=reason, initiated_by=initiated_by)
+        return jsonify({
+            "success": True,
+            "emergency_stop": False,
+            "mode": "manual",
+            "message": f"Emergency stop successfully reset by {initiated_by}. Operational mode returned to MANUAL."
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/vm/reboot", methods=["POST"])
+@admin_required
+def xen_vm_reboot():
+    """
+    POST /api/xen/vm/reboot
+    Controlled VM reboot via XenAPI to apply startup baseline configuration.
+    Request JSON: { "vm_name": "Alpine-Linux", "confirmed": true, "reason": "..." }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        vm_name = body.get("vm_name")
+        confirmed = body.get("confirmed", False)
+        reason = body.get("reason", "Controlled reboot to apply vCPU baseline")
+
+        if not vm_name:
+            return jsonify({"success": False, "error": "Field 'vm_name' is required."}), 400
+        if not confirmed:
+            return jsonify({"success": False, "error": "Explicit confirmation required to initiate VM reboot."}), 400
+
+        initiated_by = request.user.get("email", "admin")
+        res = reboot_vm_service(vm_name, reason=reason, initiated_by=initiated_by)
+        status_code = 200 if res.get("success") else 500
+        return jsonify(res), status_code
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

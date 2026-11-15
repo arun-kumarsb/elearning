@@ -149,6 +149,9 @@ def init_sqlite_schema(conn):
             execution_status TEXT NOT NULL DEFAULT 'SUCCESS',
             error_message TEXT,
             initiated_by TEXT NOT NULL DEFAULT 'system',
+            controller_version TEXT DEFAULT 'v2.0',
+            xen_operation_id TEXT,
+            verification_status TEXT DEFAULT 'verified',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -197,10 +200,24 @@ def init_sqlite_schema(conn):
             error_message TEXT
         );
     """)
+    # Ensure existing sqlite database has all required Phase 3 columns
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(resource_allocation_history)")
+        existing_cols = [c[1] for c in cur.fetchall()]
+        if "controller_version" not in existing_cols:
+            cur.execute("ALTER TABLE resource_allocation_history ADD COLUMN controller_version TEXT DEFAULT 'v2.0'")
+        if "xen_operation_id" not in existing_cols:
+            cur.execute("ALTER TABLE resource_allocation_history ADD COLUMN xen_operation_id TEXT")
+        if "verification_status" not in existing_cols:
+            cur.execute("ALTER TABLE resource_allocation_history ADD COLUMN verification_status TEXT DEFAULT 'verified'")
+    except Exception as ex:
+        logger.debug(f"SQLite column migration check notice: {ex}")
+
     conn.commit()
 
-# Pre-computed hash for password 'SimStudent@123' using pbkdf2:sha256
-SIMULATED_STUDENT_PASSWORD_HASH = "pbkdf2:sha256:1000000$LHWW9g77yC0CZuA0$57bffe0028cdfea8d26d26dcc8391fea937ee2bfc9284fb0b5bb65c73506eb48"
+# Pre-computed verified hash for password 'SimStudent@123' using pbkdf2:sha256
+SIMULATED_STUDENT_PASSWORD_HASH = "pbkdf2:sha256:1000000$b1xeb7TuetU1TxQV$96fc3c1e8db19001afa9e5c53643748f0679c88623e601bdf1bf08835a47d13f"
 
 def ensure_simulated_student_pool(target_count: int = 200) -> int:
     """
@@ -212,6 +229,16 @@ def ensure_simulated_student_pool(target_count: int = 200) -> int:
         # Check existing count
         existing = query_db("SELECT COUNT(*) as cnt FROM users WHERE email LIKE '%@elearning.test'")
         current_cnt = existing[0]["cnt"] if existing else 0
+
+        # Update password hash for existing pool to ensure authentic authentication succeeds
+        if current_cnt > 0:
+            execute_db(
+                "UPDATE users SET password_hash = %s WHERE email LIKE '%@elearning.test'"
+                if ACTIVE_DB_MODE == "mariadb"
+                else "UPDATE users SET password_hash = ? WHERE email LIKE '%@elearning.test'",
+                (SIMULATED_STUDENT_PASSWORD_HASH,)
+            )
+
         if current_cnt >= target_count:
             return current_cnt
 
@@ -237,10 +264,11 @@ def ensure_simulated_student_pool(target_count: int = 200) -> int:
             
             # Insert user
             execute_db(
-                "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, 'student', %s) ON DUPLICATE KEY UPDATE role='student'"
+                "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, 'student', %s) ON DUPLICATE KEY UPDATE password_hash=%s, role='student'"
                 if ACTIVE_DB_MODE == "mariadb"
                 else "INSERT OR IGNORE INTO users (email, password_hash, role, student_id) VALUES (?, ?, 'student', ?)",
-                (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
+                (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id, SIMULATED_STUDENT_PASSWORD_HASH) if ACTIVE_DB_MODE == "mariadb"
+                else (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
             )
         return target_count
     except Exception as e:

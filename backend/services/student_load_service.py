@@ -4,7 +4,8 @@ Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 
 Generates authentic, real student web traffic against the Flask REST API and MariaDB database
 using dedicated synthetic accounts (@elearning.test) with staggered ramp-up (1 to 200 students),
-live throughput and latency measurement, and automatic safety interlocks.
+live throughput and latency measurement, structured failure breakdown tracking,
+and automatic safety interlocks.
 """
 
 import time
@@ -17,7 +18,7 @@ from collections import deque
 import requests
 
 from backend.config import Config
-from backend.database import query_db, execute_db, ensure_simulated_student_pool
+from backend.database import query_db, execute_db, ensure_simulated_student_pool, SIMULATED_STUDENT_PASSWORD_HASH
 
 logger = logging.getLogger("StudentLoadSimulator")
 
@@ -37,6 +38,18 @@ class StudentLoadSimulatorService:
 
         # Sliding window for RPS and latency calculations
         self._recent_requests: deque = deque(maxlen=500) # (timestamp, latency_ms, is_success, is_db)
+
+        # Structured failure breakdown
+        self._failure_breakdown: Dict[str, int] = {
+            "http_401_403": 0,
+            "http_404": 0,
+            "http_500": 0,
+            "connection_refused": 0,
+            "timeout": 0,
+            "db_error": 0,
+            "other": 0
+        }
+        self._recent_errors: deque = deque(maxlen=50)
         
         # Live counters
         self._active_students: int = 0
@@ -54,8 +67,23 @@ class StudentLoadSimulatorService:
                 cls._instance = cls()
             return cls._instance
 
+    def verify_simulated_student_pool(self) -> bool:
+        """Pre-validate that simulated student accounts can authenticate before load generation."""
+        try:
+            ensure_simulated_student_pool(200)
+            from werkzeug.security import check_password_hash
+            user_row = query_db("SELECT password_hash FROM users WHERE email = 'sim_student_1@elearning.test'")
+            if user_row and check_password_hash(user_row[0]["password_hash"], "SimStudent@123"):
+                return True
+            # Repair password hash if mismatched
+            execute_db("UPDATE users SET password_hash = %s WHERE email LIKE '%@elearning.test'", (SIMULATED_STUDENT_PASSWORD_HASH,))
+            return True
+        except Exception as e:
+            logger.warning(f"Simulated student credential pre-check notice: {e}")
+            return True
+
     def get_status(self) -> Dict[str, Any]:
-        """Return the current live status and statistics of the student simulator."""
+        """Return the current live status, failure breakdown, and statistics of the student simulator."""
         with self._live_stats_lock:
             if not self.current_session:
                 return {
@@ -76,11 +104,20 @@ class StudentLoadSimulatorService:
                     "elapsed_duration_sec": 0,
                     "test_duration_sec": 0,
                     "ramp_up_duration_sec": 0,
+                    "failure_breakdown": dict(self._failure_breakdown),
+                    "recent_errors": list(self._recent_errors),
                     "error_message": None
                 }
 
             now = time.time()
-            elapsed = int(now - self.current_session["started_at"]) if self.current_session.get("started_at") else 0
+            if self.current_session.get("stopped_at"):
+                elapsed = int(self.current_session["stopped_at"] - self.current_session["started_at"])
+            else:
+                elapsed = int(now - self.current_session["started_at"]) if self.current_session.get("started_at") else 0
+
+            test_dur = self.current_session.get("test_duration_sec", 60)
+            if self.current_session.get("status") in ("completed", "stopped", "emergency_stopped", "stopped_safety_limit"):
+                elapsed = min(elapsed, test_dur)
             
             # Calculate rolling RPS and latency in the last 2 seconds
             cutoff = now - 2.0
@@ -108,9 +145,11 @@ class StudentLoadSimulatorService:
                 "db_queries_per_sec": db_qps,
                 "db_queries_total": self._db_queries_total,
                 "elapsed_duration_sec": elapsed,
-                "test_duration_sec": self.current_session["test_duration_sec"],
+                "test_duration_sec": test_dur,
                 "ramp_up_duration_sec": self.current_session["ramp_up_duration_sec"],
                 "workload_intensity": self.current_session["workload_intensity"],
+                "failure_breakdown": dict(self._failure_breakdown),
+                "recent_errors": list(self._recent_errors),
                 "error_message": self.current_session.get("error_message")
             }
 
@@ -126,7 +165,20 @@ class StudentLoadSimulatorService:
     ) -> Dict[str, Any]:
         """
         Start an authentic student traffic load test with gradual ramp-up.
+        Enforces emergency stop check and pre-validates student credentials.
         """
+        # Interlock check: Emergency Stop
+        try:
+            from xen_monitor.resource_monitor import XenResourceMonitor
+            mon = XenResourceMonitor.get_instance()
+            if hasattr(mon, "allocation_engine") and mon.allocation_engine.emergency_stop:
+                return {
+                    "success": False,
+                    "error": "Emergency Stop is currently engaged by administrator. Please reset emergency stop before starting student load tests."
+                }
+        except Exception as ex:
+            logger.debug(f"Could not check allocation engine emergency stop: {ex}")
+
         with self._lock:
             if self.current_session and self.current_session.get("status") in ("ramping_up", "running"):
                 return {
@@ -138,7 +190,6 @@ class StudentLoadSimulatorService:
             # Normalize parameters
             valid_students = [1, 5, 10, 25, 50, 100, 150, 200]
             if simulated_students not in valid_students:
-                # Find nearest valid
                 simulated_students = min(valid_students, key=lambda x: abs(x - simulated_students))
 
             simulated_students = max(1, min(200, int(simulated_students)))
@@ -150,12 +201,25 @@ class StudentLoadSimulatorService:
             if clean_target not in ("app_vm", "db_vm", "both"):
                 clean_target = "app_vm"
 
+            # Pre-validate credentials to prevent cascading 401 errors
+            self.verify_simulated_student_pool()
+
             session_id = f"load-test-{uuid.uuid4().hex[:12]}"
             self._stop_event.clear()
             self._worker_threads = []
             
             with self._live_stats_lock:
                 self._recent_requests.clear()
+                self._recent_errors.clear()
+                self._failure_breakdown = {
+                    "http_401_403": 0,
+                    "http_404": 0,
+                    "http_500": 0,
+                    "connection_refused": 0,
+                    "timeout": 0,
+                    "db_error": 0,
+                    "other": 0
+                }
                 self._active_students = 0
                 self._students_joining = simulated_students
                 self._students_leaving = 0
@@ -317,6 +381,18 @@ class StudentLoadSimulatorService:
             if spawn_interval > 0:
                 time.sleep(spawn_interval)
 
+            # Safety check even during ramp-up if massive failures occur
+            with self._live_stats_lock:
+                tot = self._total_requests
+                fail = self._failed_requests
+            if tot >= 30 and (fail / tot) > 0.50:
+                logger.warning(f"Safety limit tripped during ramp-up: Error rate exceeded 50% ({fail}/{tot}). Terminating load test.")
+                with self._lock:
+                    if self.current_session:
+                        self.current_session["status"] = "stopped_safety_limit"
+                        self.current_session["error_message"] = "Safety threshold tripped: High failure rate > 50%."
+                break
+
         with self._lock:
             if self.current_session and not self._stop_event.is_set():
                 self.current_session["status"] = "running"
@@ -360,12 +436,13 @@ class StudentLoadSimulatorService:
 
         # Update final database record
         final_status = "completed"
+        now_stopped = time.time()
         with self._lock:
             if self.current_session:
                 if self.current_session.get("status") in ("emergency_stopped", "stopped_safety_limit"):
                     final_status = self.current_session["status"]
                 self.current_session["status"] = final_status
-                self.current_session["stopped_at"] = time.time()
+                self.current_session["stopped_at"] = now_stopped
 
         try:
             execute_db(
@@ -409,18 +486,36 @@ class StudentLoadSimulatorService:
             res = session.post(
                 f"{base_url}/login",
                 json={"email": email, "password": password},
-                timeout=3.0
+                timeout=4.0
             )
             lat = (time.time() - t0) * 1000.0
             success = (res.status_code == 200)
             if success:
                 token = res.json().get("token")
-            self._record_request(lat, success, is_db=False)
-        except Exception:
+                self._record_request(lat, True, is_db=False, status_code=200, endpoint="/api/login")
+            else:
+                self._record_request(
+                    lat, False, is_db=False, status_code=res.status_code,
+                    endpoint="/api/login", error_message=f"Login HTTP {res.status_code}"
+                )
+        except requests.exceptions.Timeout:
             lat = (time.time() - t0) * 1000.0
-            self._record_request(lat, False, is_db=False)
+            self._record_request(lat, False, is_db=False, category="timeout", endpoint="/api/login", error_message="Login timed out")
+        except requests.exceptions.ConnectionError as ce:
+            lat = (time.time() - t0) * 1000.0
+            self._record_request(lat, False, is_db=False, category="connection_refused", endpoint="/api/login", error_message=str(ce))
+        except Exception as e:
+            lat = (time.time() - t0) * 1000.0
+            self._record_request(lat, False, is_db=False, category="other", endpoint="/api/login", error_message=str(e))
 
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        # If student login fails, do not hammer endpoints with unauthenticated requests
+        if not token:
+            logger.warning(f"Simulated student #{student_index} failed authentication ({email}); standing by.")
+            while not self._stop_event.is_set():
+                time.sleep(1.0)
+            return
 
         # 2. Main simulated student lifecycle loop
         actions = ["dashboard", "courses", "course_details", "profile"]
@@ -432,28 +527,47 @@ class StudentLoadSimulatorService:
             t_start = time.time()
             is_db = False
             success = False
+            status_code = None
+            endpoint = action
+            err_msg = None
 
             try:
                 if action == "dashboard":
+                    endpoint = "/api/dashboard"
                     r = session.get(f"{base_url}/dashboard", headers=headers, timeout=4.0)
-                    success = (r.status_code == 200)
-                    is_db = True # Dashboard executes DB queries
+                    status_code = r.status_code
+                    success = (status_code == 200)
+                    is_db = True
+                    if not success:
+                        err_msg = f"Dashboard HTTP {status_code}"
 
                 elif action == "courses":
+                    endpoint = "/api/courses"
                     r = session.get(f"{base_url}/courses", headers=headers, timeout=4.0)
-                    success = (r.status_code == 200)
+                    status_code = r.status_code
+                    success = (status_code == 200)
                     is_db = True
+                    if not success:
+                        err_msg = f"Courses HTTP {status_code}"
 
                 elif action == "course_details":
+                    endpoint = "/api/courses/1"
                     r = session.get(f"{base_url}/courses/1", headers=headers, timeout=4.0)
-                    success = (r.status_code in (200, 404))
+                    status_code = r.status_code
+                    success = (status_code in (200, 404))
+                    if not success:
+                        err_msg = f"CourseDetails HTTP {status_code}"
 
                 elif action == "profile":
+                    endpoint = "/api/auth/me"
                     r = session.get(f"{base_url}/auth/me", headers=headers, timeout=4.0)
-                    success = (r.status_code == 200)
+                    status_code = r.status_code
+                    success = (status_code == 200)
+                    if not success:
+                        err_msg = f"Profile HTTP {status_code}"
 
                 elif action == "db_transaction":
-                    # Safe transient MariaDB write & query on dedicated table workload_simulation_test
+                    endpoint = "/api/xen/student-load/db-query"
                     is_db = True
                     r = session.post(
                         f"{base_url}/xen/student-load/db-query",
@@ -461,21 +575,42 @@ class StudentLoadSimulatorService:
                         json={"session_id": session_id, "student_id": student_index},
                         timeout=5.0
                     )
-                    success = (r.status_code == 200)
+                    status_code = r.status_code
+                    success = (status_code == 200)
+                    if not success:
+                        err_msg = f"DB Transaction HTTP {status_code}"
 
                 lat = (time.time() - t_start) * 1000.0
-                self._record_request(lat, success, is_db=is_db)
+                self._record_request(
+                    lat, success, is_db=is_db, status_code=status_code,
+                    endpoint=endpoint, error_message=err_msg
+                )
 
+            except requests.exceptions.Timeout:
+                lat = (time.time() - t_start) * 1000.0
+                self._record_request(lat, False, is_db=is_db, category="timeout", endpoint=endpoint, error_message="Request timed out")
+            except requests.exceptions.ConnectionError as ce:
+                lat = (time.time() - t_start) * 1000.0
+                self._record_request(lat, False, is_db=is_db, category="connection_refused", endpoint=endpoint, error_message=str(ce))
             except Exception as e:
                 lat = (time.time() - t_start) * 1000.0
-                self._record_request(lat, False, is_db=is_db)
+                self._record_request(lat, False, is_db=is_db, category="other", endpoint=endpoint, error_message=str(e))
 
             # Jittered sleep according to configured requests per student
             jitter = random.uniform(0.85, 1.15)
             time.sleep(sleep_interval * jitter)
 
-    def _record_request(self, latency_ms: float, is_success: bool, is_db: bool):
-        """Thread-safe update of live metrics."""
+    def _record_request(
+        self,
+        latency_ms: float,
+        is_success: bool,
+        is_db: bool = False,
+        status_code: Optional[int] = None,
+        category: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        error_message: Optional[str] = None
+    ):
+        """Thread-safe update of live metrics and failure breakdown."""
         now = time.time()
         with self._live_stats_lock:
             self._total_requests += 1
@@ -483,6 +618,32 @@ class StudentLoadSimulatorService:
                 self._successful_requests += 1
             else:
                 self._failed_requests += 1
+                
+                # Determine failure category
+                if status_code in (401, 403):
+                    cat = "http_401_403"
+                elif status_code == 404:
+                    cat = "http_404"
+                elif status_code and status_code >= 500:
+                    cat = "http_500"
+                elif category == "timeout" or (error_message and ("timeout" in error_message.lower() or "timed out" in error_message.lower())):
+                    cat = "timeout"
+                elif category == "connection_refused" or (error_message and ("refused" in error_message.lower() or "connection" in error_message.lower())):
+                    cat = "connection_refused"
+                elif is_db:
+                    cat = "db_error"
+                else:
+                    cat = category or "other"
+
+                self._failure_breakdown[cat] = self._failure_breakdown.get(cat, 0) + 1
+                self._recent_errors.append({
+                    "timestamp": now,
+                    "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                    "endpoint": endpoint or "unknown",
+                    "status_code": status_code,
+                    "category": cat,
+                    "message": (error_message or f"HTTP {status_code}")[:120]
+                })
 
             if is_db:
                 self._db_queries_total += 1

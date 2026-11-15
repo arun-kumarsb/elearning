@@ -172,10 +172,20 @@ def set_automation_mode(mode: str) -> str:
     monitor = get_monitor_instance()
     return monitor.set_allocation_mode(mode)
 
-def set_emergency_stop_status(enabled: bool) -> bool:
+def set_emergency_stop_status(enabled: bool, reason: str = "Administrator emergency stop", initiated_by: str = "admin") -> bool:
     """Engage or disengage emergency stop."""
     monitor = get_monitor_instance()
-    return monitor.set_emergency_stop(enabled)
+    return monitor.set_emergency_stop(enabled, reason=reason, initiated_by=initiated_by)
+
+def reset_emergency_stop_status(reason: str = "Administrator reset", initiated_by: str = "admin") -> bool:
+    """Reset emergency stop status, return operational mode to manual, and record audit log."""
+    monitor = get_monitor_instance()
+    return monitor.reset_emergency_stop(reason=reason, initiated_by=initiated_by)
+
+def reboot_vm_service(vm_name: str, reason: str = "Admin requested reboot", initiated_by: str = "admin") -> Dict[str, Any]:
+    """Gracefully reboot VM via XenAPI with audit logging."""
+    monitor = get_monitor_instance()
+    return monitor.reboot_vm(vm_name, reason=reason, initiated_by=initiated_by)
 
 def apply_manual_cpu_allocation(vm_name: str, vcpus: int, reason: str = "Admin manual override", initiated_by: str = "admin") -> Dict[str, Any]:
     """Perform administrator-initiated live vCPU allocation."""

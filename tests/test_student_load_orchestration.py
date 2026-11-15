@@ -79,6 +79,19 @@ class TestStudentLoadOrchestration(unittest.TestCase):
         # Pre-seed simulated student accounts
         ensure_simulated_student_pool(20)
 
+    def tearDown(self):
+        """Clean up test fixtures and reset state."""
+        try:
+            if hasattr(self, "engine"):
+                self.engine.set_emergency_stop(False)
+            from xen_monitor.resource_monitor import XenResourceMonitor
+            mon = XenResourceMonitor.get_instance()
+            if hasattr(mon, "allocation_engine"):
+                mon.allocation_engine.set_emergency_stop(False)
+            StudentLoadSimulatorService.get_instance().stop_load_test()
+        except Exception:
+            pass
+
     # -------------------------------------------------------------------------
     # Scenario 1: Idle Workload
     # -------------------------------------------------------------------------
@@ -427,7 +440,7 @@ class TestStudentLoadOrchestration(unittest.TestCase):
     def test_18_workload_termination_safety_limit(self):
         """Verify safety limit trips when simulated error rate exceeds 50%."""
         svc = StudentLoadSimulatorService.get_instance()
-        svc.start_load_test(target_vm="app_vm", simulated_students=5, test_duration=30)
+        svc.start_load_test(target_vm="app_vm", simulated_students=5, ramp_up_duration=0, test_duration=30)
         
         # Inject simulated failures to trip 50% error rate limit
         with svc._live_stats_lock:
@@ -615,6 +628,150 @@ class TestStudentLoadOrchestration(unittest.TestCase):
         # 6. Admin with normalized variant ('Administrator') authorized
         r_admin_mode = client.post("/api/xen/allocation/mode", headers=admin_headers, json={"mode": "manual"})
         self.assertEqual(r_admin_mode.status_code, 200)
+
+    # -------------------------------------------------------------------------
+    # Scenario 26: XML-RPC 64-bit Integer (<i8>) Serialization for Memory >= 2048 MB
+    # -------------------------------------------------------------------------
+    def test_26_xmlrpc_i8_large_memory_serialization(self):
+        """Verify XML-RPC marshaller handles byte values >= 2048 MB without OverflowError."""
+        import xmlrpc.client
+
+        # 2048 MB, 3072 MB, 4096 MB in bytes
+        bytes_2048 = 2048 * 1024 * 1024  # 2147483648 > 2^31 - 1
+        bytes_4096 = 4096 * 1024 * 1024  # 4294967296 > 2^31 - 1
+
+        xml_res = xmlrpc.client.dumps((bytes_2048,))
+        self.assertIn("<value><i8>2147483648</i8></value>", xml_res)
+
+        xml_res2 = xmlrpc.client.dumps((bytes_4096,))
+        self.assertIn("<value><i8>4294967296</i8></value>", xml_res2)
+
+        # Normal small int should still serialize as standard <int>
+        xml_res3 = xmlrpc.client.dumps((1024,))
+        self.assertIn("<value><int>1024</int></value>", xml_res3)
+
+    # -------------------------------------------------------------------------
+    # Scenario 27: CPU Hot-Unplug Maintenance Required Verification
+    # -------------------------------------------------------------------------
+    def test_27_live_cpu_unplug_maintenance_required(self):
+        """Verify baseline or scale-down reports MAINTENANCE_REQUIRED when guest online CPUs remain high."""
+        client = XenAPIClient(self.config)
+        client.is_connected = True
+        client.session_id = "test-session"
+        client.proxy = MagicMock()
+
+        # Mock VM currently running 4 vCPUs
+        client.proxy.VM.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {
+                "ref_app": {
+                    "uuid": "01cdb87c-408f-72bc-449c-0364a8e69647",
+                    "name_label": "Alpine-Linux",
+                    "is_control_domain": False,
+                    "is_a_template": False,
+                    "is_a_snapshot": False,
+                    "power_state": "Running",
+                    "VCPUs_max": "4",
+                    "VCPUs_at_startup": "4",
+                    "metrics": "ref_metrics"
+                }
+            }
+        }
+        client.proxy.VM.get_record.return_value = {
+            "Status": "Success",
+            "Value": {
+                "VCPUs_max": "4",
+                "VCPUs_at_startup": "1",
+                "power_state": "Running",
+                "metrics": "ref_metrics"
+            }
+        }
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {"Status": "Success"}
+        client.proxy.VM.set_VCPUs_number_live.return_value = {"Status": "Success"}
+
+        # Simulate local guest probe reporting 4 CPUs online (unplug not supported by guest kernel)
+        with patch.object(client, "_read_local_linux_guest_online_cpus", return_value=4):
+            res = client.set_vm_vcpus("Alpine-Linux", 1)
+
+            self.assertFalse(res["success"])
+            self.assertEqual(res["status"], "MAINTENANCE_REQUIRED")
+            self.assertTrue(res["maintenance_required"])
+            self.assertEqual(res["actual_value"], 4)
+            self.assertEqual(res["startup_vcpus"], 1)
+            self.assertIn("Live CPU hot-unplug is unsupported", res["error"])
+
+    # -------------------------------------------------------------------------
+    # Scenario 28: MariaDB Baseline Safety Verification
+    # -------------------------------------------------------------------------
+    def test_28_mariadb_baseline_safety_verification(self):
+        """Verify MariaDB buffer pool safety check prevents unsafe memory reductions."""
+        client = XenAPIClient(self.config)
+
+        # Case 1: Safe buffer pool (e.g. 512 MB <= 768 MB limit)
+        with patch("backend.database.is_mariadb_reachable", return_value=True), \
+             patch("backend.database.query_db", return_value=[{"Variable_name": "innodb_buffer_pool_size", "Value": str(512 * 1024 * 1024)}]):
+            res_safe = client.verify_mariadb_baseline_safety(target_ram_mb=1024.0)
+            self.assertTrue(res_safe["safe"])
+            self.assertEqual(res_safe["buffer_pool_mb"], 512.0)
+            self.assertEqual(res_safe["safe_limit_mb"], 768.0)
+
+        # Case 2: Unsafe buffer pool (e.g. 896 MB > 768 MB limit)
+        with patch("backend.database.is_mariadb_reachable", return_value=True), \
+             patch("backend.database.query_db", return_value=[{"Variable_name": "innodb_buffer_pool_size", "Value": str(896 * 1024 * 1024)}]):
+            res_unsafe = client.verify_mariadb_baseline_safety(target_ram_mb=1024.0)
+            self.assertFalse(res_unsafe["safe"])
+            self.assertEqual(res_unsafe["buffer_pool_mb"], 896.0)
+            self.assertIn("exceeds safe limit", res_unsafe["error"])
+
+    # -------------------------------------------------------------------------
+    # Scenario 29: Emergency Stop Reset Endpoint & Audit
+    # -------------------------------------------------------------------------
+    def test_29_emergency_stop_reset_endpoint(self):
+        """Verify administrator emergency stop reset endpoint disengages interlock and records audit."""
+        app = create_app()
+        client = app.test_client()
+
+        # Engage emergency stop first
+        client.post("/api/xen/allocation/emergency-stop", headers=self.admin_headers, json={"action": "engage"})
+
+        # Student attempt to reset -> 403 Forbidden
+        r_student = client.post("/api/xen/allocation/emergency-stop/reset", headers=self.student_headers, json={"confirmed": True})
+        self.assertEqual(r_student.status_code, 403)
+
+        # Admin reset with justification
+        r_admin = client.post("/api/xen/allocation/emergency-stop/reset", headers=self.admin_headers, json={
+            "reason": "Test audit resolution verified",
+            "confirmed": True
+        })
+        self.assertEqual(r_admin.status_code, 200)
+        data = r_admin.get_json()
+        self.assertTrue(data["success"])
+        self.assertFalse(data["emergency_stop"])
+        self.assertEqual(data["mode"], "manual")
+
+    # -------------------------------------------------------------------------
+    # Scenario 30: Student Load Simulator Failure Breakdown & Clamping
+    # -------------------------------------------------------------------------
+    def test_30_student_load_simulator_failure_breakdown(self):
+        """Verify failure categorization into breakdown dictionary and elapsed duration clamping."""
+        svc = StudentLoadSimulatorService.get_instance()
+        svc.start_load_test(target_vm="app_vm", simulated_students=5, test_duration=30)
+
+        # Record specific categorized failures
+        svc._record_request(latency_ms=120.0, is_success=False, is_db=False, status_code=401, endpoint="/api/courses", error_message="Unauthorized")
+        svc._record_request(latency_ms=50.0, is_success=False, is_db=False, status_code=404, endpoint="/api/missing", error_message="Not Found")
+        svc._record_request(latency_ms=200.0, is_success=False, is_db=False, status_code=500, endpoint="/api/enroll", error_message="Internal Server Error")
+        svc._record_request(latency_ms=5000.0, is_success=False, is_db=False, status_code=None, endpoint="/api/heavy", error_message="Request timed out")
+
+        status = svc.get_status()
+        breakdown = status["failure_breakdown"]
+        self.assertEqual(breakdown["http_401_403"], 1)
+        self.assertEqual(breakdown["http_404"], 1)
+        self.assertEqual(breakdown["http_500"], 1)
+        self.assertEqual(breakdown["timeout"], 1)
+        self.assertGreaterEqual(len(status["recent_errors"]), 4)
+
+        svc.stop_load_test()
 
 if __name__ == "__main__":
     unittest.main()

@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS resource_allocation_history (
     execution_status VARCHAR(20) NOT NULL DEFAULT 'SUCCESS',
     error_message TEXT NULL,
     initiated_by VARCHAR(100) NOT NULL DEFAULT 'system',
+    controller_version VARCHAR(20) NOT NULL DEFAULT 'v2.0',
+    xen_operation_id VARCHAR(64) NULL,
+    verification_status VARCHAR(30) NOT NULL DEFAULT 'verified',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_alloc_vm_time (vm_name, created_at),
     INDEX idx_alloc_status (execution_status)
@@ -213,7 +216,10 @@ CREATE TABLE IF NOT EXISTS student_load_test_sessions (
     INDEX idx_sl_started (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-
-
-
+-- ----------------------------------------------------------------------------
+-- Phase 3 Upgrade: Controller Versioning & Verification Columns
+-- ----------------------------------------------------------------------------
+ALTER TABLE resource_allocation_history ADD COLUMN IF NOT EXISTS controller_version VARCHAR(20) DEFAULT 'v2.0';
+ALTER TABLE resource_allocation_history ADD COLUMN IF NOT EXISTS xen_operation_id VARCHAR(64) NULL;
+ALTER TABLE resource_allocation_history ADD COLUMN IF NOT EXISTS verification_status VARCHAR(30) DEFAULT 'verified';
 
