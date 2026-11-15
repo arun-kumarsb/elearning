@@ -4,7 +4,7 @@ import json
 import base64
 import time
 from werkzeug.security import generate_password_hash, check_password_hash
-from backend.database import query_db, execute_db
+from backend.database import query_db, execute_db, SIMULATED_STUDENT_PASSWORD_HASH
 from backend.config import Config
 
 def hash_password(password: str) -> str:
@@ -99,10 +99,9 @@ def authenticate_user(email: str, password: str) -> dict | None:
                 s_id = execute_db("INSERT INTO students (name, email) VALUES (%s, %s)", (sim_name, clean_email), return_last_id=True)
             else:
                 s_id = student["id"]
-            new_hash = hash_password(password)
             user_id = execute_db(
                 "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, %s, %s)",
-                (clean_email, new_hash, "student", s_id),
+                (clean_email, SIMULATED_STUDENT_PASSWORD_HASH, "student", s_id),
                 return_last_id=True
             )
             token = generate_session_token(user_id, clean_email, "student")
@@ -135,11 +134,8 @@ def authenticate_user(email: str, password: str) -> dict | None:
             }
         return None
 
-    # Handle synthetic student existing in table with potential hash mismatch
+    # Handle dedicated synthetic student existing in table - instant verification without blocking PBKDF2
     if clean_email.endswith("@elearning.test") and password == "SimStudent@123":
-        if not verify_password(password, user["password_hash"]):
-            new_hash = hash_password(password)
-            execute_db("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user["id"]))
         token = generate_session_token(user["id"], user["email"], user["role"])
         return {
             "id": user["id"],

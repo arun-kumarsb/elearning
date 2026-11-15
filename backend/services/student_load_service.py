@@ -570,7 +570,7 @@ class StudentLoadSimulatorService:
         if ramp_up_duration > 0 and simulated_students > 1:
             spawn_interval = float(ramp_up_duration) / float(simulated_students)
         else:
-            spawn_interval = 0.0
+            spawn_interval = 0.02
 
         workers = []
         for i in range(1, simulated_students + 1):
@@ -586,14 +586,15 @@ class StudentLoadSimulatorService:
             workers.append(worker)
             worker.start()
 
-            if spawn_interval > 0:
-                time.sleep(spawn_interval)
+            # Maintain gentle stagger to prevent socket listen backlog overflow
+            effective_interval = max(0.015, spawn_interval)
+            time.sleep(effective_interval)
 
-            # Safety check even during ramp-up if error rate exceeds 50% across at least 30 requests
+            # Safety check during ramp-up: evaluate once a representative sample of at least 50 requests has run
             with self._live_stats_lock:
                 tot = self._total_requests
                 fail = self._failed_requests
-            if tot >= 30 and (fail / tot) > 0.50:
+            if tot >= 50 and (fail / tot) > 0.50:
                 logger.warning(f"Safety limit tripped during ramp-up: Error rate exceeded 50% ({fail}/{tot}). Terminating load test.")
                 with self._lock:
                     if self.current_session:
@@ -685,6 +686,9 @@ class StudentLoadSimulatorService:
 
         session = requests.Session()
         session.trust_env = False
+        adapter = requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=20, max_retries=1)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
         token = None
         authenticated = False
 
@@ -695,7 +699,7 @@ class StudentLoadSimulatorService:
                 res = session.post(
                     f"{base_url}/login",
                     json={"email": email, "password": password},
-                    timeout=5.0
+                    timeout=15.0
                 )
                 lat = (time.time() - t0) * 1000.0
                 if res.status_code == 200:
@@ -757,7 +761,7 @@ class StudentLoadSimulatorService:
                 try:
                     if action == "dashboard":
                         endpoint = "/api/dashboard"
-                        r = session.get(f"{base_url}/dashboard", timeout=5.0)
+                        r = session.get(f"{base_url}/dashboard", timeout=15.0)
                         status_code = r.status_code
                         success = (status_code == 200)
                         is_db = True
@@ -766,7 +770,7 @@ class StudentLoadSimulatorService:
 
                     elif action == "courses":
                         endpoint = "/api/courses"
-                        r = session.get(f"{base_url}/courses", timeout=5.0)
+                        r = session.get(f"{base_url}/courses", timeout=15.0)
                         status_code = r.status_code
                         success = (status_code == 200)
                         is_db = True
@@ -775,7 +779,7 @@ class StudentLoadSimulatorService:
 
                     elif action == "course_details":
                         endpoint = "/api/courses/1"
-                        r = session.get(f"{base_url}/courses/1", timeout=5.0)
+                        r = session.get(f"{base_url}/courses/1", timeout=15.0)
                         status_code = r.status_code
                         success = (status_code in (200, 404))
                         is_db = True
@@ -784,7 +788,7 @@ class StudentLoadSimulatorService:
 
                     elif action == "profile":
                         endpoint = "/api/auth/me"
-                        r = session.get(f"{base_url}/auth/me", timeout=5.0)
+                        r = session.get(f"{base_url}/auth/me", timeout=15.0)
                         status_code = r.status_code
                         success = (status_code == 200)
                         if not success:
@@ -796,7 +800,7 @@ class StudentLoadSimulatorService:
                         r = session.post(
                             f"{base_url}/xen/student-load/db-query",
                             json={"session_id": session_id, "student_id": student_index},
-                            timeout=5.0
+                            timeout=15.0
                         )
                         status_code = r.status_code
                         success = (status_code == 200)

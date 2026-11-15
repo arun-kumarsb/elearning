@@ -1064,5 +1064,64 @@ class TestStudentLoadOrchestration(unittest.TestCase):
                 self.assertEqual(len(res["actions"]), 1)
                 self.assertEqual(res["actions"][0]["resource"], "cpu")
 
+    # -------------------------------------------------------------------------
+    # Scenario 40: Fast Simulated Student Authentication (No PBKDF2 Bottleneck)
+    # -------------------------------------------------------------------------
+    def test_40_fast_simulated_student_authentication(self):
+        """Verify simulated student auth executes rapidly without 1,000,000 PBKDF2 delay."""
+        from backend.services.auth_service import authenticate_user
+        t0 = time.time()
+        auth = authenticate_user("sim_student_1@elearning.test", "SimStudent@123")
+        dur_ms = (time.time() - t0) * 1000.0
+
+        self.assertIsNotNone(auth)
+        self.assertEqual(auth["role"], "student")
+        self.assertIn("token", auth)
+        self.assertTrue(auth["token"].count(".") == 1)
+        # Authentication should execute in well under 300ms (avoiding the previous 528ms PBKDF2 lockup)
+        self.assertLess(dur_ms, 300.0)
+
+    # -------------------------------------------------------------------------
+    # Scenario 41: Database VM Guest Memory Telemetry (Never N/A)
+    # -------------------------------------------------------------------------
+    def test_41_database_vm_guest_memory_never_na(self):
+        """Verify that Database VM guest memory telemetry is always populated and never N/A."""
+        from backend.database import get_database_guest_metrics
+        from xen_monitor.xen_api_client import XenAPIClient
+
+        # Direct database module test
+        db_metrics = get_database_guest_metrics()
+        self.assertIsNotNone(db_metrics.get("guest_total_ram_mb"))
+        self.assertIsNotNone(db_metrics.get("guest_used_ram_mb"))
+        self.assertIsNotNone(db_metrics.get("guest_available_ram_mb"))
+        self.assertIsNotNone(db_metrics.get("guest_ram_percent"))
+        self.assertGreater(db_metrics["guest_total_ram_mb"], 0)
+        self.assertGreater(db_metrics["guest_available_ram_mb"], 0)
+
+        # XenAPI client runtime metrics test
+        client = XenAPIClient(self.config)
+        client.is_connected = True
+        client.session_id = "test-session"
+        client.proxy = MagicMock()
+
+        vm_info = {
+            "name": "Alpine-DB",
+            "uuid": "0a6dec09-0466-0079-4b66-80704b59587d",
+            "power_state": "Running",
+            "vcpus": 4,
+            "metrics_ref": "OpaqueRef:NULL",
+            "guest_metrics_ref": "OpaqueRef:NULL",
+            "memory_static_max_mb": 4096.0,
+            "memory_dynamic_max_mb": 1024.0
+        }
+
+        runtime = client.get_vm_runtime_metrics(vm_info)
+        self.assertEqual(runtime["name"], "Alpine-DB")
+        self.assertIsNotNone(runtime["guest_total_ram_mb"])
+        self.assertIsNotNone(runtime["guest_used_ram_mb"])
+        self.assertIsNotNone(runtime["guest_available_ram_mb"])
+        self.assertIsNotNone(runtime["guest_ram_percent"])
+        self.assertIn("mariadb", runtime["memory_source"])
+
 if __name__ == "__main__":
     unittest.main()
