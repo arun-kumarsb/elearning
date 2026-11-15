@@ -68,7 +68,12 @@ def create_app():
                 "/api/students",
                 "/api/courses",
                 "/api/enrollments",
-                "/api/xen/status"
+                "/api/xen/status",
+                "/api/xen/metrics",
+                "/api/xen/host",
+                "/api/xen/vms",
+                "/api/xen/monitor/status",
+                "/api/xen/history"
             ]
         })
 
@@ -88,6 +93,15 @@ if __name__ == "__main__":
         ensure_schema()
     except Exception as e:
         logger.warning(f"Initial schema check deferred: {e}")
+
+    # Start Xen Resource Monitoring Engine in background
+    try:
+        from backend.services.xen_service import get_monitor_instance
+        monitor = get_monitor_instance()
+        monitor.start()
+        logger.info("Xen Resource Monitoring background daemon activated.")
+    except Exception as e:
+        logger.warning(f"Could not start Xen monitoring daemon: {e}")
 
     app = create_app()
     logger.info(f"Starting Flask API on {Config.FLASK_HOST}:{Config.FLASK_PORT}")

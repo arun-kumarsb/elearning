@@ -84,3 +84,43 @@ INSERT IGNORE INTO users (email, password_hash, role, student_id) VALUES
 -- Initial Enrollment
 INSERT IGNORE INTO enrollments (student_id, course_id) VALUES (1, 1);
 
+-- ----------------------------------------------------------------------------
+-- Phase 2: Table: vm_metrics_history
+-- Purpose: Persistent real-time Xen hypervisor & VM telemetry storage
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS vm_metrics_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    vm_name VARCHAR(100) NOT NULL,
+    vm_uuid VARCHAR(64) NULL,
+    entity_type VARCHAR(20) NOT NULL DEFAULT 'vm',
+    cpu_percent FLOAT NOT NULL DEFAULT 0.0,
+    ram_percent FLOAT NOT NULL DEFAULT 0.0,
+    allocated_ram_mb FLOAT NOT NULL DEFAULT 0.0,
+    used_ram_mb FLOAT NOT NULL DEFAULT 0.0,
+    vcpu_count INT NOT NULL DEFAULT 1,
+    network_rx_bytes BIGINT NOT NULL DEFAULT 0,
+    network_tx_bytes BIGINT NOT NULL DEFAULT 0,
+    INDEX idx_metrics_vm_time (vm_name, timestamp),
+    INDEX idx_metrics_time (timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ----------------------------------------------------------------------------
+-- Phase 2: Table: allocation_decisions_history
+-- Purpose: History of rule-based dynamic resource scaling recommendations
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS allocation_decisions_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    vm_name VARCHAR(100) NOT NULL,
+    cpu_action VARCHAR(30) NOT NULL DEFAULT 'HOLD',
+    ram_action VARCHAR(30) NOT NULL DEFAULT 'HOLD',
+    current_vcpus INT NOT NULL DEFAULT 1,
+    recommended_vcpus INT NOT NULL DEFAULT 1,
+    current_ram_mb FLOAT NOT NULL DEFAULT 0.0,
+    recommended_ram_mb FLOAT NOT NULL DEFAULT 0.0,
+    rationale TEXT NULL,
+    cooldown_active BOOLEAN NOT NULL DEFAULT FALSE,
+    INDEX idx_decision_vm_time (vm_name, timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

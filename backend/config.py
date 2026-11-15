@@ -23,10 +23,22 @@ class Config:
     
     # Xen Virtualization & Infrastructure Metadata
     XCP_NG_HOST = os.getenv("XCP_NG_HOST", "10.240.109.196")
+    XCP_NG_USERNAME = os.getenv("XCP_NG_USERNAME", "root")
+    XCP_NG_PASSWORD = os.getenv("XCP_NG_PASSWORD", "")
+    XCP_NG_VERIFY_SSL = os.getenv("XCP_NG_VERIFY_SSL", "False").lower() in ("true", "1", "t")
+    APP_VM_NAME = os.getenv("APP_VM_NAME", "Alpine-Linux-New")
+    DB_VM_NAME = os.getenv("DB_VM_NAME", "Alpine-DB")
     APP_VM_IP = os.getenv("APP_VM_IP", "10.240.109.51")
     DB_VM_IP = os.getenv("DB_VM_IP", "10.240.109.248")
     XEN_ENVIRONMENT = os.getenv("XEN_ENVIRONMENT", "XCP-ng Virtualized Infrastructure")
     
+    # Phase 2 Monitoring Engine Configuration
+    MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "5"))
+    CPU_SCALE_UP_THRESHOLD = float(os.getenv("CPU_SCALE_UP_THRESHOLD", "75.0"))
+    CPU_SCALE_DOWN_THRESHOLD = float(os.getenv("CPU_SCALE_DOWN_THRESHOLD", "25.0"))
+    RAM_SCALE_UP_THRESHOLD = float(os.getenv("RAM_SCALE_UP_THRESHOLD", "80.0"))
+    MONITOR_MODE = os.getenv("MONITOR_MODE", "read_only")
+
     # Optional Mock DB for local offline UI unit testing
     USE_MOCK_DB = os.getenv("USE_MOCK_DB", "False").lower() in ("true", "1", "t")
 

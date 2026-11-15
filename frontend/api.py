@@ -154,6 +154,27 @@ def api_delete_enrollment(enrollment_id: int) -> Dict[str, Any]:
 def api_get_xen_status() -> Dict[str, Any]:
     return safe_request("GET", "xen/status")
 
+def api_get_xen_metrics() -> Dict[str, Any]:
+    return safe_request("GET", "xen/metrics")
+
+def api_get_xen_host() -> Dict[str, Any]:
+    return safe_request("GET", "xen/host")
+
+def api_get_xen_vms() -> Dict[str, Any]:
+    return safe_request("GET", "xen/vms")
+
+def api_get_xen_vm_metrics(vm_id: str) -> Dict[str, Any]:
+    return safe_request("GET", f"xen/vms/{vm_id}/metrics")
+
+def api_get_xen_monitor_status() -> Dict[str, Any]:
+    return safe_request("GET", "xen/monitor/status")
+
+def api_get_xen_history(vm_name: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    endpoint = f"xen/history?limit={limit}"
+    if vm_name:
+        endpoint += f"&vm_name={vm_name}"
+    return safe_request("GET", endpoint)
+
 def api_get_health() -> Dict[str, Any]:
     return safe_request("GET", "health")
 

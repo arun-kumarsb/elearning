@@ -1,189 +1,383 @@
 """
-Xen-Based Dynamic Resource Allocation Module (Future Development Architecture)
-Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
-
-Hypervisor: XCP-ng (Xen Cloud Platform)
-Host Management IP: 10.240.109.196
-VM 1 (Database): Alpine-DB (10.240.109.248)
-VM 2 (Application): Alpine-Linux-New (10.240.109.51)
-
-NOTE FOR COLLEGE PROJECT EVALUATION:
-This module provides the modular architecture, mathematical scaling model,
-and XenAPI interface contracts for Phase 2 dynamic resource allocation.
-As specified in the Phase 1 MVP design, hypervisor automation hooks are structured
-here independently from the core e-learning application.
+Xen Resource Monitoring Scheduler & Engine
+Coordinates XAPI communication, metric normalization, historical storage,
+and dynamic allocation recommendation evaluations.
 """
 
 import time
+import os
+import sys
+import threading
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("XenResourceMonitor")
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-class XenAllocationConfig:
-    """Configuration parameters for dynamic resource allocation under Xen."""
-    def __init__(
-        self,
-        xcp_host: str = "10.240.109.196",
-        poll_interval_sec: int = 5,
-        cpu_scale_up_threshold: float = 80.0,
-        cpu_scale_down_threshold: float = 25.0,
-        ram_scale_up_threshold: float = 85.0,
-        ram_scale_down_threshold: float = 30.0,
-        cooldown_period_sec: int = 60
-    ):
-        self.xcp_host = xcp_host
-        self.poll_interval_sec = poll_interval_sec
-        self.cpu_scale_up_threshold = cpu_scale_up_threshold
-        self.cpu_scale_down_threshold = cpu_scale_down_threshold
-        self.ram_scale_up_threshold = ram_scale_up_threshold
-        self.ram_scale_down_threshold = ram_scale_down_threshold
-        self.cooldown_period_sec = cooldown_period_sec
+from xen_monitor.monitor_config import MonitorConfig
+from xen_monitor.xen_api_client import XenAPIClient
+from xen_monitor.network_monitor import NetworkMonitor
+from xen_monitor.vm_metrics import MetricsNormalizer
+from xen_monitor.allocation_engine import AllocationEngine
+from backend.database import execute_db, query_db
 
+logger = logging.getLogger("ResourceMonitor")
 
-class XenVMMetrics:
-    """Structured container for VM performance telemetry."""
-    def __init__(self, vm_name: str, vm_ip: str, vcpus: int, memory_allocated_mb: int):
-        self.vm_name = vm_name
-        self.vm_ip = vm_ip
-        self.vcpus = vcpus
-        self.memory_allocated_mb = memory_allocated_mb
-        self.current_cpu_percent: float = 0.0
-        self.current_ram_percent: float = 0.0
-        self.last_updated: float = time.time()
+class XenResourceMonitor:
+    _instance = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "vm_name": self.vm_name,
-            "vm_ip": self.vm_ip,
-            "vcpus": self.vcpus,
-            "memory_allocated_mb": self.memory_allocated_mb,
-            "current_cpu_percent": self.current_cpu_percent,
-            "current_ram_percent": self.current_ram_percent,
-            "last_updated": self.last_updated
+    def __init__(self, config: Optional[MonitorConfig] = None):
+        self.config = config or MonitorConfig()
+        self.client = XenAPIClient(self.config)
+        self.network_monitor = NetworkMonitor()
+        self.normalizer = MetricsNormalizer(self.network_monitor)
+        self.allocation_engine = AllocationEngine(self.config)
+
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.RLock()
+
+        self.last_poll_time: Optional[float] = None
+        self.last_successful_update: Optional[float] = None
+        self.consecutive_failures: int = 0
+        self.last_error: Optional[str] = None
+
+        # Cached latest snapshot
+        self._latest_state: Dict[str, Any] = {
+            "status": "initializing",
+            "connected": False,
+            "hypervisor": None,
+            "vms": {},
+            "all_discovered_vms": [],
+            "recommendations": {},
+            "last_successful_update": None,
+            "error": None
         }
 
+    @classmethod
+    def get_instance(cls, config: Optional[MonitorConfig] = None):
+        """Singleton accessor for application-wide resource monitor."""
+        if cls._instance is None:
+            cls._instance = cls(config)
+        return cls._instance
 
-class XenHypervisorConnector:
-    """
-    XenAPI / XAPI Connection Controller.
-    Phase 2 implementation integrates XenAPI via xmlrpc or xe CLI:
-      - xe vm-list
-      - xe vm-param-get
-      - xe vm-memory-limits-set
-      - xe vm-vcpu-set
-    """
-    def __init__(self, host_ip: str = "10.240.109.196", username: str = "root", password: str = ""):
-        self.host_ip = host_ip
-        self.username = username
-        self.password = password
-        self.session_id: Optional[str] = None
-        self.is_connected = False
+    def start(self):
+        """Start the background monitoring thread."""
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._thread = threading.Thread(target=self._run_loop, daemon=True, name="XenMonitorThread")
+            self._thread.start()
+            logger.info(f"Xen Resource Monitoring Engine started (Interval: {self.config.poll_interval_sec}s)")
 
-    def connect(self) -> bool:
-        """Establishes session with XCP-ng XAPI (Stubbed for Phase 2)."""
-        logger.info(f"[Phase 2 Integration] Prepared connection to XCP-ng host at {self.host_ip}")
-        self.is_connected = True
-        return True
+    def stop(self):
+        """Stop the background monitoring thread."""
+        with self._lock:
+            self._running = False
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
+            self.client.close()
+            logger.info("Xen Resource Monitoring Engine stopped.")
 
-    def get_vm_uuid_by_name(self, vm_name: str) -> str:
-        """Returns Xen VM UUID. Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"""
-        return f"stub-uuid-{vm_name.lower().replace('_', '-')}"
+    def _run_loop(self):
+        """Periodic polling loop."""
+        while self._running:
+            try:
+                self.poll_once()
+            except Exception as e:
+                logger.error(f"Unexpected error in monitoring cycle: {e}")
+            time.sleep(self.config.poll_interval_sec)
 
-    def set_vm_memory_dynamic_limits(self, vm_uuid: str, dynamic_min_mb: int, dynamic_max_mb: int) -> bool:
-        """
-        Adjusts Xen ballooning dynamic limits:
-        Command: xe vm-memory-limits-set uuid=<vm_uuid> dynamic-min=<MIN> dynamic-max=<MAX>
-        """
-        logger.info(
-            f"[Phase 2 Action] Dynamic RAM Allocation Triggered for VM {vm_uuid}: "
-            f"min={dynamic_min_mb}MB, max={dynamic_max_mb}MB"
-        )
-        return True
+    def poll_once(self) -> Dict[str, Any]:
+        """Execute a single polling iteration against XCP-ng hypervisor."""
+        self.last_poll_time = time.time()
+        now = self.last_poll_time
+        iso_time = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
 
-    def set_vm_vcpus(self, vm_uuid: str, target_vcpus: int) -> bool:
-        """
-        Adjusts virtual CPU allocation:
-        Command: xe vm-vcpu-set uuid=<vm_uuid> vcpus-number=<target_vcpus>
-        """
-        logger.info(
-            f"[Phase 2 Action] Dynamic CPU Allocation Triggered for VM {vm_uuid}: "
-            f"target_vcpus={target_vcpus}"
-        )
-        return True
+        # Connect if not connected
+        if not self.client.is_connected:
+            connected = self.client.connect()
+            if not connected:
+                self.consecutive_failures += 1
+                self.last_error = self.client.last_error
+                with self._lock:
+                    self._latest_state = {
+                        "status": "offline",
+                        "connected": False,
+                        "hypervisor": None,
+                        "vms": {},
+                        "all_discovered_vms": [],
+                        "recommendations": {},
+                        "last_poll_time": now,
+                        "last_successful_update": self.last_successful_update,
+                        "last_successful_update_iso": datetime.fromtimestamp(
+                            self.last_successful_update, tz=timezone.utc
+                        ).isoformat() if self.last_successful_update else None,
+                        "consecutive_failures": self.consecutive_failures,
+                        "error": self.last_error,
+                        "diagnostics": {
+                            "xcp_host": self.config.xcp_host,
+                            "xcp_user": self.config.xcp_username,
+                            "reason": self.last_error or "Connection to XCP-ng host failed."
+                        }
+                    }
+                return self._latest_state
 
+        # We are connected, retrieve live metrics
+        try:
+            # 1. Host Metrics
+            raw_host = self.client.get_host_metrics()
+            norm_host = self.normalizer.normalize_host_metrics(raw_host, now)
 
-class DynamicAllocationEngine:
-    """
-    Evaluates real-time VM workload metrics against allocation thresholds
-    and executes dynamic resource scaling actions.
-    """
-    def __init__(self, config: XenAllocationConfig, connector: XenHypervisorConnector):
-        self.config = config
-        self.connector = connector
-        self.last_action_timestamp = 0.0
+            # 2. Discover all VMs
+            all_vms = self.client.get_all_vms()
 
-    def evaluate_and_scale(self, vm_metrics: XenVMMetrics) -> Dict[str, Any]:
-        """
-        Decision-making algorithm for scaling CPU and RAM.
-        Follows a rule-based elasticity policy with cooldown dampening.
-        """
-        now = time.time()
-        decision = {
-            "vm": vm_metrics.vm_name,
-            "cpu_action": "HOLD",
-            "ram_action": "HOLD",
-            "reason": "Metrics within nominal bounds"
-        }
+            # 3. Target Specific VMs (Alpine-Linux-New and Alpine-DB)
+            app_vm_rec = self.client.get_vm_by_name(self.config.app_vm_name)
+            db_vm_rec = self.client.get_vm_by_name(self.config.db_vm_name)
 
-        # Check cooldown to prevent resource thrashing
-        if (now - self.last_action_timestamp) < self.config.cooldown_period_sec:
-            decision["reason"] = "In cooldown window; stabilizing workload"
-            return decision
+            norm_vms: Dict[str, Any] = {}
+            recommendations: Dict[str, Any] = {}
 
-        # 1. Evaluate CPU Utilization
-        if vm_metrics.current_cpu_percent > self.config.cpu_scale_up_threshold:
-            decision["cpu_action"] = "SCALE_UP"
-            target_vcpus = vm_metrics.vcpus + 1
-            uuid = self.connector.get_vm_uuid_by_name(vm_metrics.vm_name)
-            self.connector.set_vm_vcpus(uuid, target_vcpus)
-            self.last_action_timestamp = now
-        elif vm_metrics.current_cpu_percent < self.config.cpu_scale_down_threshold and vm_metrics.vcpus > 1:
-            decision["cpu_action"] = "SCALE_DOWN"
-            target_vcpus = vm_metrics.vcpus - 1
-            uuid = self.connector.get_vm_uuid_by_name(vm_metrics.vm_name)
-            self.connector.set_vm_vcpus(uuid, target_vcpus)
-            self.last_action_timestamp = now
+            # Process Application VM
+            if app_vm_rec:
+                raw_app_metrics = self.client.get_vm_runtime_metrics(app_vm_rec)
+                norm_app = self.normalizer.normalize_vm_metrics(
+                    raw_app_metrics, role_label="app_vm", expected_ip=self.config.app_vm_ip, timestamp=now
+                )
+                norm_vms[self.config.app_vm_name] = norm_app
+                # Elasticity recommendation
+                recommendations[self.config.app_vm_name] = self.allocation_engine.evaluate_vm(norm_app)
+                # Store historical metric
+                self._persist_metric(norm_app)
+            else:
+                norm_vms[self.config.app_vm_name] = {
+                    "name": self.config.app_vm_name,
+                    "status": "not_discovered",
+                    "reason": f"VM named '{self.config.app_vm_name}' not found on XCP-ng host."
+                }
 
-        # 2. Evaluate RAM Utilization
-        if vm_metrics.current_ram_percent > self.config.ram_scale_up_threshold:
-            decision["ram_action"] = "SCALE_UP"
-            target_ram = vm_metrics.memory_allocated_mb + 512
-            uuid = self.connector.get_vm_uuid_by_name(vm_metrics.vm_name)
-            self.connector.set_vm_memory_dynamic_limits(uuid, vm_metrics.memory_allocated_mb, target_ram)
-            self.last_action_timestamp = now
+            # Process Database VM
+            if db_vm_rec:
+                raw_db_metrics = self.client.get_vm_runtime_metrics(db_vm_rec)
+                norm_db = self.normalizer.normalize_vm_metrics(
+                    raw_db_metrics, role_label="db_vm", expected_ip=self.config.db_vm_ip, timestamp=now
+                )
+                norm_vms[self.config.db_vm_name] = norm_db
+                # Elasticity recommendation
+                recommendations[self.config.db_vm_name] = self.allocation_engine.evaluate_vm(norm_db)
+                # Store historical metric
+                self._persist_metric(norm_db)
+            else:
+                norm_vms[self.config.db_vm_name] = {
+                    "name": self.config.db_vm_name,
+                    "status": "not_discovered",
+                    "reason": f"VM named '{self.config.db_vm_name}' not found on XCP-ng host."
+                }
 
-        return decision
+            # Persist host metric
+            self._persist_host_metric(norm_host)
+
+            # Persist recommendations
+            for rec in recommendations.values():
+                self._persist_recommendation(rec)
+
+            self.last_successful_update = now
+            self.consecutive_failures = 0
+            self.last_error = None
+
+            with self._lock:
+                self._latest_state = {
+                    "status": "online",
+                    "connected": True,
+                    "timestamp": now,
+                    "timestamp_iso": iso_time,
+                    "last_successful_update": self.last_successful_update,
+                    "last_successful_update_iso": iso_time,
+                    "hypervisor": norm_host,
+                    "vms": norm_vms,
+                    "all_discovered_vms": [
+                        {"name": v["name"], "uuid": v["uuid"], "power_state": v["power_state"], "vcpus": v["vcpus"]}
+                        for v in all_vms
+                    ],
+                    "recommendations": recommendations,
+                    "error": None
+                }
+
+            return self._latest_state
+
+        except Exception as e:
+            self.consecutive_failures += 1
+            self.last_error = str(e)
+            logger.error(f"Error querying XAPI metrics: {e}")
+            self.client.close()  # Reset session for next retry
+
+            with self._lock:
+                self._latest_state = {
+                    "status": "error",
+                    "connected": False,
+                    "hypervisor": None,
+                    "vms": {},
+                    "all_discovered_vms": [],
+                    "recommendations": {},
+                    "last_poll_time": now,
+                    "last_successful_update": self.last_successful_update,
+                    "consecutive_failures": self.consecutive_failures,
+                    "error": self.last_error
+                }
+            return self._latest_state
+
+    def _persist_metric(self, vm_norm: Dict[str, Any]):
+        """Save a single normalized VM telemetry record into MariaDB/SQLite."""
+        try:
+            sql = """
+                INSERT INTO vm_metrics_history 
+                (vm_name, vm_uuid, entity_type, cpu_percent, ram_percent, allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            execute_db(sql, (
+                vm_norm["name"],
+                vm_norm.get("uuid"),
+                vm_norm.get("entity_type", "vm"),
+                vm_norm.get("cpu_percent", 0.0),
+                vm_norm.get("ram_percent", 0.0),
+                vm_norm.get("allocated_ram_mb", 0.0),
+                vm_norm.get("used_ram_mb", 0.0),
+                vm_norm.get("vcpu_count", 1),
+                vm_norm.get("network_rx_bytes", 0),
+                vm_norm.get("network_tx_bytes", 0)
+            ))
+        except Exception as e:
+            logger.debug(f"Failed to persist VM metric history: {e}")
+
+    def _persist_host_metric(self, host_norm: Dict[str, Any]):
+        """Save host hypervisor metric record."""
+        try:
+            sql = """
+                INSERT INTO vm_metrics_history 
+                (vm_name, vm_uuid, entity_type, cpu_percent, ram_percent, allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            execute_db(sql, (
+                host_norm["name"],
+                host_norm.get("uuid"),
+                "hypervisor",
+                host_norm.get("cpu_percent", 0.0),
+                host_norm.get("ram_percent", 0.0),
+                host_norm.get("total_ram_mb", 0.0),
+                host_norm.get("used_ram_mb", 0.0),
+                host_norm.get("total_cpu_cores", 0),
+                0,
+                0
+            ))
+        except Exception as e:
+            logger.debug(f"Failed to persist Host metric history: {e}")
+
+    def _persist_recommendation(self, rec: Dict[str, Any]):
+        """Save allocation decision history."""
+        try:
+            sql = """
+                INSERT INTO allocation_decisions_history
+                (vm_name, cpu_action, ram_action, current_vcpus, recommended_vcpus, current_ram_mb, recommended_ram_mb, rationale, cooldown_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            execute_db(sql, (
+                rec["vm_name"],
+                rec["cpu_action"],
+                rec["ram_action"],
+                rec["current_vcpus"],
+                rec["recommended_vcpus"],
+                rec["current_ram_mb"],
+                rec["recommended_ram_mb"],
+                rec["rationale"],
+                1 if rec["cooldown_active"] else 0
+            ))
+        except Exception as e:
+            logger.debug(f"Failed to persist allocation decision: {e}")
+
+    # Query methods for Flask API
+    def get_latest_metrics(self) -> Dict[str, Any]:
+        """Return cached snapshot of latest live metrics."""
+        with self._lock:
+            needs_poll = (self._latest_state.get("status") == "initializing")
+            if not needs_poll:
+                return dict(self._latest_state)
+        return self.poll_once()
+
+    def get_host_metrics(self) -> Dict[str, Any]:
+        state = self.get_latest_metrics()
+        return state.get("hypervisor") or {"status": state.get("status"), "error": state.get("error")}
+
+    def get_vms(self) -> List[Dict[str, Any]]:
+        state = self.get_latest_metrics()
+        return state.get("all_discovered_vms", [])
+
+    def get_vm_metrics(self, vm_identifier: str) -> Optional[Dict[str, Any]]:
+        state = self.get_latest_metrics()
+        vms = state.get("vms", {})
+        # Search by exact name
+        if vm_identifier in vms:
+            return vms[vm_identifier]
+        # Search by uuid or lowercase
+        for k, v in vms.items():
+            if isinstance(v, dict):
+                if v.get("uuid") == vm_identifier or k.lower() == vm_identifier.lower():
+                    return v
+        return None
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "engine": "XenResourceMonitor",
+                "status": self._latest_state.get("status", "unknown"),
+                "connected": self._latest_state.get("connected", False),
+                "poll_interval_sec": self.config.poll_interval_sec,
+                "last_poll_time": self.last_poll_time,
+                "last_successful_update": self.last_successful_update,
+                "consecutive_failures": self.consecutive_failures,
+                "error": self.last_error,
+                "config": self.config.to_dict()
+            }
+
+    def get_history(self, vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Query persistent metric history from database."""
+        limit = min(200, max(1, int(limit)))
+        if vm_name:
+            sql = """
+                SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
+                       allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
+                FROM vm_metrics_history
+                WHERE LOWER(vm_name) = LOWER(%s)
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """
+            rows = query_db(sql, (vm_name, limit))
+        else:
+            sql = """
+                SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
+                       allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
+                FROM vm_metrics_history
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """
+            rows = query_db(sql, (limit,))
+
+        # Format datetimes
+        for r in rows:
+            if r.get("timestamp"):
+                r["timestamp"] = str(r["timestamp"])
+        return rows
 
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("Xen-Based Dynamic Resource Allocation Module (Phase 2 Architecture)")
-    print("XCP-ng Host: 10.240.109.196 | Target VMs: Alpine-Linux-New & Alpine-DB")
-    print("=" * 70)
-    config = XenAllocationConfig()
-    connector = XenHypervisorConnector()
-    connector.connect()
-    engine = DynamicAllocationEngine(config, connector)
-
-    # Simulated metric evaluation
-    sample_metrics = XenVMMetrics("Alpine-Linux-New", "10.240.109.51", vcpus=2, memory_allocated_mb=2048)
-    sample_metrics.current_cpu_percent = 88.5 # High load trigger
-    sample_metrics.current_ram_percent = 72.0
-
-    print("\nSimulating High Workload Evaluation:")
-    result = engine.evaluate_and_scale(sample_metrics)
-    print(f"Decision: {result}")
-    print("\nArchitecture successfully verified and ready for Phase 2 XenAPI coupling.")
-
+    logging.basicConfig(level=logging.INFO)
+    print("Testing Xen Resource Monitor standalone...")
+    monitor = XenResourceMonitor()
+    result = monitor.poll_once()
+    print("Poll Result:")
+    import json
+    print(json.dumps(result, indent=2, default=str))

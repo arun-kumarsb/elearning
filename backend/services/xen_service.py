@@ -1,19 +1,24 @@
 """
-Xen Hypervisor Resource Management & Monitoring Service (Modular Architecture)
+Xen Hypervisor Resource Management & Monitoring Service
 Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 
-NOTE: This module defines the architectural contracts, telemetry data structures, 
-and integration hooks for Phase 2 dynamic CPU and RAM resource allocation under XCP-ng / Xen.
-In accordance with MVP requirements, actual hypervisor dynamic resizing is reserved 
-for Phase 2 via Xen XAPI (xe-cli / XenAPI).
+Provides service functions interfacing the Flask API routes with the Xen Resource Monitoring Engine.
 """
 
 import os
 import platform
 import logging
+from typing import Dict, Any, List, Optional
 from backend.config import Config
+from xen_monitor.resource_monitor import XenResourceMonitor
+from xen_monitor.monitor_config import MonitorConfig
 
 logger = logging.getLogger(__name__)
+
+def get_monitor_instance() -> XenResourceMonitor:
+    """Return the application-wide XenResourceMonitor singleton instance."""
+    cfg = MonitorConfig()
+    return XenResourceMonitor.get_instance(cfg)
 
 def read_local_vm_telemetry() -> dict:
     """
@@ -25,7 +30,6 @@ def read_local_vm_telemetry() -> dict:
     mem_used_pct = 0.0
     cpu_load_1m = 0.0
     
-    # Try reading Linux /proc/meminfo (standard on Alpine Linux)
     if os.path.exists("/proc/meminfo"):
         try:
             meminfo = {}
@@ -45,7 +49,6 @@ def read_local_vm_telemetry() -> dict:
         except Exception as e:
             logger.debug(f"Could not parse /proc/meminfo: {e}")
 
-    # Try reading Linux /proc/loadavg
     if os.path.exists("/proc/loadavg"):
         try:
             with open("/proc/loadavg", "r") as f:
@@ -65,14 +68,16 @@ def read_local_vm_telemetry() -> dict:
     }
 
 def get_xen_cluster_metadata() -> dict:
-    """
-    Return virtualized infrastructure configuration and integration readiness.
-    """
+    """Return virtualization infrastructure configuration and integration status."""
     local_telemetry = read_local_vm_telemetry()
-    
+    monitor = get_monitor_instance()
+    status = monitor.get_status()
+
     return {
-        "phase": "Phase 1 MVP: E-Learning Web Application & Modular Xen Architecture",
-        "next_phase": "Phase 2: XenAPI Daemon & Dynamic CPU/RAM Allocation Controller",
+        "phase": "Phase 2: Real-Time Xen/XCP-ng Resource Monitoring & Elasticity Engine",
+        "next_phase": "Phase 3: Automated Dynamic Actuation & Closed-Loop Hypervisor Scaling",
+        "monitoring_status": status["status"],
+        "monitoring_connected": status["connected"],
         "virtualization": {
             "hypervisor": "XCP-ng / Xen",
             "host_management_ip": Config.XCP_NG_HOST,
@@ -81,38 +86,57 @@ def get_xen_cluster_metadata() -> dict:
         },
         "vms": [
             {
-                "name": "Alpine-Linux-New",
+                "name": Config.APP_VM_NAME,
                 "role": "Application Server (Streamlit Frontend + Flask Backend)",
                 "ip": Config.APP_VM_IP,
                 "os": "Alpine Linux 3.24",
                 "python": "3.14.x",
-                "telemetry": local_telemetry,
-                "dynamic_allocation_hooks": {
-                    "vcpus_target_controllable": True,
-                    "memory_dynamic_min_max_controllable": True,
-                    "xen_ballooning_driver": "xen-balloon"
-                }
+                "telemetry": local_telemetry
             },
             {
-                "name": "Alpine-DB",
+                "name": Config.DB_VM_NAME,
                 "role": "Database Server (MariaDB 11.8.9)",
                 "ip": Config.DB_VM_IP,
                 "port": Config.DB_PORT,
                 "os": "Alpine Linux 3.24",
-                "database": "MariaDB 11.8.9",
-                "dynamic_allocation_hooks": {
-                    "vcpus_target_controllable": True,
-                    "memory_dynamic_min_max_controllable": True,
-                    "xen_ballooning_driver": "xen-balloon"
-                }
+                "database": "MariaDB 11.8.9"
             }
         ],
-        "future_xenapi_spec": {
-            "cpu_command_format": "xe vm-param-set uuid=<VM_UUID> VCPUs-at-startup=<N>",
-            "ram_command_format": "xe vm-memory-limits-set uuid=<VM_UUID> dynamic-min=<MIN> dynamic-max=<MAX>",
-            "metrics_polling_interval_sec": 5,
-            "scale_up_threshold_cpu_pct": 75,
-            "scale_down_threshold_cpu_pct": 25
+        "elasticity_thresholds": {
+            "cpu_scale_up_threshold_pct": Config.CPU_SCALE_UP_THRESHOLD,
+            "cpu_scale_down_threshold_pct": Config.CPU_SCALE_DOWN_THRESHOLD,
+            "ram_scale_up_threshold_pct": Config.RAM_SCALE_UP_THRESHOLD,
+            "polling_interval_sec": Config.MONITOR_INTERVAL,
+            "mode": Config.MONITOR_MODE
         }
     }
 
+def get_realtime_metrics() -> Dict[str, Any]:
+    """Retrieve consolidated real-time hypervisor, App VM, and DB VM metrics."""
+    monitor = get_monitor_instance()
+    return monitor.get_latest_metrics()
+
+def get_host_resource_metrics() -> Dict[str, Any]:
+    """Retrieve physical host CPU cores, RAM, and running VM metrics."""
+    monitor = get_monitor_instance()
+    return monitor.get_host_metrics()
+
+def get_discovered_vms() -> List[Dict[str, Any]]:
+    """Retrieve list of discovered VMs from XCP-ng hypervisor."""
+    monitor = get_monitor_instance()
+    return monitor.get_vms()
+
+def get_single_vm_metrics(vm_identifier: str) -> Optional[Dict[str, Any]]:
+    """Retrieve telemetry for a specific VM by UUID or name."""
+    monitor = get_monitor_instance()
+    return monitor.get_vm_metrics(vm_identifier)
+
+def get_monitor_health() -> Dict[str, Any]:
+    """Retrieve monitoring engine status and health."""
+    monitor = get_monitor_instance()
+    return monitor.get_status()
+
+def get_metrics_history(vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve persistent historical telemetry from database."""
+    monitor = get_monitor_instance()
+    return monitor.get_history(vm_name=vm_name, limit=limit)

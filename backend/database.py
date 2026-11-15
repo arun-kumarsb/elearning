@@ -93,6 +93,36 @@ def init_sqlite_schema(conn):
 
         -- Seed Sample Enrollment
         INSERT OR IGNORE INTO enrollments (student_id, course_id) VALUES (1, 1);
+
+        -- Phase 2 Tables: VM Metrics & Allocation Decisions
+        CREATE TABLE IF NOT EXISTS vm_metrics_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            vm_name TEXT NOT NULL,
+            vm_uuid TEXT,
+            entity_type TEXT DEFAULT 'vm',
+            cpu_percent REAL DEFAULT 0.0,
+            ram_percent REAL DEFAULT 0.0,
+            allocated_ram_mb REAL DEFAULT 0.0,
+            used_ram_mb REAL DEFAULT 0.0,
+            vcpu_count INTEGER DEFAULT 1,
+            network_rx_bytes INTEGER DEFAULT 0,
+            network_tx_bytes INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS allocation_decisions_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            vm_name TEXT NOT NULL,
+            cpu_action TEXT DEFAULT 'HOLD',
+            ram_action TEXT DEFAULT 'HOLD',
+            current_vcpus INTEGER DEFAULT 1,
+            recommended_vcpus INTEGER DEFAULT 1,
+            current_ram_mb REAL DEFAULT 0.0,
+            recommended_ram_mb REAL DEFAULT 0.0,
+            rationale TEXT,
+            cooldown_active INTEGER DEFAULT 0
+        );
     """)
     conn.commit()
 

@@ -110,18 +110,25 @@ XenLearn/
 │       ├── courses.py              # Course catalog (Student) & Course CRUD (Admin)
 │       ├── enrollments.py          # My Enrollments (Student) & Registry (Admin)
 │       ├── admin.py                # Administrator diagnostic hub
+│       ├── xen_monitoring.py       # Live Xen Resource Monitoring Dashboard & Gauges
 │       └── xen_architecture.py     # Educational visualization of Xen infrastructure
 ├── database/
 │   ├── schema.sql                  # Complete canonical database schema
 │   ├── migrations.sql              # Non-destructive, idempotent migration script
 │   └── apply_migrations.py         # Automated database inspection & migration runner
 ├── xen_monitor/
-│   ├── resource_monitor.py         # Modular Xen Dynamic Allocation controller
-│   └── README.md                   # Mathematical model for CPU/RAM ballooning
+│   ├── resource_monitor.py         # Background monitoring daemon & persistence scheduler
+│   ├── xen_api_client.py           # Authenticated XCP-ng XAPI XML-RPC client
+│   ├── vm_metrics.py               # Metric normalization & hardware mapping
+│   ├── network_monitor.py          # Network RX/TX rate delta calculator
+│   ├── allocation_engine.py        # Elasticity recommendation engine with cooldown
+│   ├── monitor_config.py           # Threshold & credential environment parser
+│   └── README.md                   # Phase 2 & 3 architectural specification
 ├── nginx/
 │   └── elearning.conf              # Nginx reverse proxy config for Alpine Linux
 ├── tests/
-│   └── test_api.py                 # Automated unit tests for all REST endpoints
+│   ├── test_api.py                 # Automated unit tests for Phase 1 REST endpoints
+│   └── test_xen_monitoring.py      # Automated unit tests for Phase 2 Xen monitoring
 ├── .env.example                    # Environment variable reference
 ├── .env                            # Working configuration
 ├── .gitignore                      # Git exclusion rules
@@ -146,6 +153,8 @@ XenLearn/
 2. **`courses`:** Adds `course_code` (`CS-101`) and `created_at` if missing.
 3. **`users`:** Role-based access table (`id`, `email`, `password_hash`, `role`, `student_id`).
 4. **`enrollments`:** Junction table with `UNIQUE (student_id, course_id)` to prevent duplicate enrollments.
+5. **`vm_metrics_history`:** Time-series telemetry storage for host & VM metrics (`timestamp`, `vm_name`, `vm_uuid`, `entity_type`, `cpu_percent`, `ram_percent`, `allocated_ram_mb`, `used_ram_mb`, `vcpu_count`, `network_rx_bytes`, `network_tx_bytes`).
+6. **`allocation_decisions_history`:** Audit trail for Phase 3 elasticity recommendations (`vm_name`, `cpu_action`, `ram_action`, `current_vcpus`, `recommended_vcpus`, `current_ram_mb`, `recommended_ram_mb`, `rationale`, `cooldown_active`).
 
 ---
 
@@ -310,39 +319,76 @@ curl -s http://10.240.109.51:5000/api/students/1/enrollments
 curl -s http://10.240.109.51:5000/api/xen/status
 ```
 
+### 8. Real-Time Consolidated Xen Metrics
+```bash
+curl -s http://10.240.109.51:5000/api/xen/metrics
+```
+
+### 9. Hypervisor Host Hardware Metrics
+```bash
+curl -s http://10.240.109.51:5000/api/xen/host
+```
+
+### 10. Discovered Virtual Machines
+```bash
+curl -s http://10.240.109.51:5000/api/xen/vms
+```
+
+### 11. Single VM Runtime Telemetry (App VM or DB VM)
+```bash
+curl -s http://10.240.109.51:5000/api/xen/vms/Alpine-Linux-New/metrics
+```
+
+### 12. Monitoring Daemon Health & Status
+```bash
+curl -s http://10.240.109.51:5000/api/xen/monitor/status
+```
+
+### 13. Historical Telemetry for Time-Series Charting
+```bash
+curl -s "http://10.240.109.51:5000/api/xen/history?limit=20"
+```
+
 ---
 
-## 10. Xen-Based Dynamic Resource Allocation (Phase 2 Design)
+## 10. Xen-Based Dynamic Resource Allocation (Phase 2 & Phase 3)
 
 The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services"**.
 
-### Phase 1 MVP (Current Deliverable):
-- Functional, responsive e-learning web application decoupled across two Alpine Linux VMs.
-- Telemetry interfaces and modular architecture established in `xen_monitor/`.
+### Phase 1: Decoupled Multi-VM Architecture (Complete)
+- Responsive e-learning web application running across two Alpine Linux VMs (Application Server & MariaDB Database Server).
+- Private virtual bridged networking with 100% verified zero packet loss.
 
-### Phase 2 Architecture (Future Expansion):
-Located in `xen_monitor/resource_monitor.py`:
-1. **Dynamic Memory Ballooning:**
-   - Guest VM runs Alpine Linux with the native Xen Balloon driver (`xen-balloon`).
-   - When application memory pressure exceeds 85%, the hypervisor expands the dynamic ceiling:
-     ```bash
-     xe vm-memory-limits-set uuid=<VM_UUID> dynamic-max=3072MiB
-     ```
-2. **Dynamic vCPU Allocation:**
-   - Under heavy student registration or online examination load, vCPUs are scaled dynamically:
-     ```bash
-     xe vm-vcpu-set uuid=<VM_UUID> vcpus-number=4
-     ```
-3. **Decoupled Security:**
-   - The hypervisor automation module runs independently from the student-facing web app to ensure zero privilege escalation risks.
+### Phase 2: Real-Time Xen/XCP-ng Resource Monitoring (Complete)
+Implemented in `xen_monitor/`:
+1. **XCP-ng XAPI Client (`xen_api_client.py`):**
+   - Connects to XCP-ng hypervisor (`10.240.109.196`) over XML-RPC (port 443/80) with timeout socket transports.
+   - Dynamically discovers guest VM UUIDs by name (`Alpine-Linux-New` and `Alpine-DB`).
+   - Retrieves host hardware cores, CPU load, total/free RAM, and running VM count.
+   - Extracts VM vCPU counts, allocated RAM, guest memory usage, and VIF network RX/TX bytes.
+2. **Metric Normalization & Rate Tracking (`vm_metrics.py`, `network_monitor.py`):**
+   - Calculates real-time network throughput (KB/s, MB/s) from delta byte counters.
+   - Normalizes host and VM metrics into unified data structures.
+3. **Database Telemetry Persistence (`resource_monitor.py`):**
+   - Stores time-series metrics into `vm_metrics_history` and `allocation_decisions_history`.
+4. **Streamlit Monitoring Interface (`frontend/pages/xen_monitoring.py`):**
+   - Displays real-time hypervisor status banner, CPU and RAM radial gauges, KPI metric cards, VM comparison matrix, and historical line charts.
+   - Includes automatic 5-second polling refresh toggle and immediate manual refresh.
+
+### Phase 3: Elasticity Recommendation Engine (Prepared & Non-Destructive)
+Implemented in `xen_monitor/allocation_engine.py`:
+- **CPU Scaling Rules:** Recommends scaling vCPUs up when CPU utilization exceeds 80%; recommends scaling down when utilization falls below 20%.
+- **Memory Scaling Rules:** Recommends ballooning RAM by +512 MB when RAM utilization exceeds 85%.
+- **Safety Hysteresis:** Enforces minimum/maximum hardware bounds and a 60-second cooldown period to prevent resource flapping.
+- **Safety Guarantee:** Phase 2 recommendations are purely advisory and logged to MariaDB; no automatic reboots or hypervisor reconfigurations occur.
 
 ---
 
 ## 11. Running Unit Tests
 
-Run the included automated test suite:
+Run the automated test suite covering Phase 1 REST APIs and Phase 2 Xen monitoring engine:
 ```bash
-python3 -m unittest tests/test_api.py
+python3 -m unittest discover tests
 ```
-*Result: 16/16 tests passing.*
+*Result: 22/22 tests passing.*
 
