@@ -210,10 +210,8 @@ def render_live_telemetry_fragment():
             st.caption(f"Memory Source: `{app_vm.get('memory_source', 'guest_proc_meminfo')}`")
 
             # Status pill for baseline
-            if online_vcpus > 1:
-                st.warning(f"⚡ **Elastic Scale Active:** Alpine-Linux is currently scaled to {online_vcpus} online vCPUs (Baseline: 1 vCPU).")
-            elif startup_vcpus > 1:
-                st.info(f"🟢 **Active Runtime Baseline Enforced:** 1 Online vCPU active (Kernel executing at 1 vCPU; startup config: {startup_vcpus} vCPUs).")
+            if online_vcpus > 1 or startup_vcpus > 1:
+                st.warning(f"⚠️ **Baseline Notice:** Alpine-Linux is currently at {online_vcpus} online / {startup_vcpus} startup vCPUs (Baseline target: 1 vCPU).")
             else:
                 st.success("✅ **Baseline Verified:** Alpine-Linux is operating at target baseline (1 vCPU, 1024 MB).")
         else:
