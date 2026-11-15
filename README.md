@@ -2,7 +2,7 @@
 
 🎓 **College Project MVP**  
 **Virtualization Platform:** XCP-ng (Xen Cloud Platform)  
-**Management Console:** XO Lite (`10.240.109.196`)  
+**Management Console:** XO Lite (`10.189.191.175`)  
 **Target Operating System:** Alpine Linux 3.24  
 **Runtime:** Python 3.14  
 
@@ -20,17 +20,20 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
 - **Student Management:** Full administrative lifecycle to view, search, inspect coursework, and register new students.
 - **Course Management:** Administrative CRUD (create, view, update, delete with safety confirmation).
 - **Course Enrollment:** Student catalog browsing, one-click enrollment, duplicate enrollment prevention (enforced at both application and database constraint levels).
-- **Xen Elasticity Architecture:** Decoupled modular design prepared for Phase 2 dynamic CPU and RAM allocation via Xen XAPI and the Xen balloon driver (`xen-balloon`).
+- **Real-Time Xen Monitoring:** Genuine telemetry collection from XCP-ng XAPI (physical host CPU/RAM, VM vCPUs, actual allocated RAM, CPU utilization %, memory ballooning %, network RX/TX).
+- **Elasticity Preparation (Phase 3):** Advisory threshold evaluation and anti-thrashing cooldown engine.
 
 ---
 
 ## 2. Infrastructure & Virtual Machine Configuration
 
-| Entity | Role | IP Address | Port(s) | OS & Software Stack |
+| Entity | Role | Current IP Address | Port(s) | OS & Software Stack |
 | :--- | :--- | :--- | :--- | :--- |
-| **XCP-ng Host** | Hypervisor | `10.240.109.196` | 80 / 443 | XCP-ng (Xen 4.17+), XO Lite |
-| **VM 1: Alpine-DB** | Database Server | `10.240.109.248` | `3306` | Alpine Linux 3.24, MariaDB 11.8.9 |
-| **VM 2: Alpine-Linux-New** | Application Server | `10.240.109.51` | `5000` (API), `8501` (UI), `80` (Nginx) | Alpine Linux 3.24, Python 3.14, Nginx 1.30.6 |
+| **XCP-ng Host** | Hypervisor | `10.189.191.175` | 80 / 443 | XCP-ng (Xen 4.17+), XO Lite |
+| **VM 1: Alpine-DB** | Database Server | `10.189.191.248` | `3306` | Alpine Linux 3.24, MariaDB 11.8.9 |
+| **VM 2: Alpine-Linux** | Application Server | `10.189.191.51` | `5000` (API), `8501` (UI), `80` (Nginx) | Alpine Linux 3.24, Python 3.14, Nginx 1.30.6 |
+
+*Note: All IP addresses and VM names are read dynamically from environment variables (`.env`). No addresses are hardcoded.*
 
 ### Multi-Tier Decoupled Architecture
 
@@ -42,7 +45,7 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
                                   │ HTTP (Port 8501 or 80)
                                   ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ VM 2: Alpine-Linux-New (10.240.109.51)                                 │
+│ VM 2: Alpine-Linux (10.189.191.51)                                     │
 │                                                                        │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │ Streamlit Frontend (Port 8501)                                 │   │
@@ -56,14 +59,14 @@ The platform separates the **Application Tier** (running Flask REST API + Stream
 │   └─────────────────────────────┬──────────────────────────────────┘   │
 └─────────────────────────────────┼──────────────────────────────────────┘
                                   │ TCP Port 3306 (PyMySQL)
-                                  │ Private Network: 10.240.109.51 -> 10.240.109.248
+                                  │ Private Network: 10.189.191.51 -> 10.189.191.248
                                   ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ VM 1: Alpine-DB (10.240.109.248)                                       │
+│ VM 1: Alpine-DB (10.189.191.248)                                       │
 │                                                                        │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │ MariaDB 11.8.9 (Database: elearning)                           │   │
-│   │ Tables: students, courses, users, enrollments                  │   │
+│   │ Tables: students, courses, users, enrollments, metrics_history │   │
 │   │ (Preserved existing records: Student One & Sample Course)      │   │
 │   └────────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────────┘
@@ -78,7 +81,7 @@ XenLearn/
 ├── backend/
 │   ├── app.py                      # Flask Application Factory & Blueprints
 │   ├── config.py                   # Environment configuration & DB parameters
-│   ├── database.py                 # PyMySQL connection factory & auto-migration
+│   ├── database.py                 # PyMySQL connection factory & idempotent migrations
 │   ├── requirements.txt            # Backend dependencies (Python 3.14 compatible)
 │   ├── routes/
 │   │   ├── auth.py                 # POST /api/login, POST /api/logout, GET /api/auth/me
@@ -87,23 +90,23 @@ XenLearn/
 │   │   ├── courses.py              # GET, POST, PUT, DELETE /api/courses
 │   │   ├── enrollments.py          # GET, POST, DELETE /api/enrollments
 │   │   ├── health.py               # GET /api/health (Database connectivity check)
-│   │   └── xen_routes.py           # GET /api/xen/status (Xen cluster metadata)
+│   │   └── xen_routes.py           # Xen status, metrics, host, vms, and history routes
 │   └── services/
 │       ├── auth_service.py         # Password hashing & HMAC session tokens
 │       ├── course_service.py       # Course CRUD logic
 │       ├── dashboard_service.py    # MariaDB statistical aggregation
 │       ├── enrollment_service.py   # Enrollment logic & duplicate prevention
 │       ├── student_service.py      # Student profile & user account linkage
-│       └── xen_service.py          # Guest telemetry & Xen Phase 2 spec
+│       └── xen_service.py          # Xen monitoring engine service interface
 ├── frontend/
 │   ├── app.py                      # Streamlit entrypoint & authentication routing
 │   ├── api.py                      # REST API client connecting to Flask
-│   ├── requirements.txt            # Frontend dependencies (Streamlit, requests)
+│   ├── requirements.txt            # Frontend dependencies (Streamlit, requests, pandas)
 │   ├── assets/
 │   │   └── style.css               # Clean academic blue & white CSS design
 │   ├── components/
-│   │   ├── cards.py                # Reusable metric KPI cards & system banner
-│   │   └── sidebar.py              # Role-aware navigation & user details card
+│   │   ├── cards.py                # Reusable metric KPI cards & dynamic system banner
+│   │   └── sidebar.py              # Role-aware navigation & infrastructure summary
 │   └── pages/
 │       ├── dashboard.py            # Real MariaDB metrics, charts, & recent activity
 │       ├── students.py             # Student management (Admin)
@@ -128,10 +131,8 @@ XenLearn/
 │   └── elearning.conf              # Nginx reverse proxy config for Alpine Linux
 ├── tests/
 │   ├── test_api.py                 # Automated unit tests for Phase 1 REST endpoints
-│   └── test_xen_monitoring.py      # Automated unit tests for Phase 2 Xen monitoring
-├── .env.example                    # Environment variable reference
-├── .env                            # Working configuration
-├── .gitignore                      # Git exclusion rules
+│   └── test_xen_monitoring.py      # Automated unit tests for Phase 2 Xen monitoring (14 tests)
+├── .env.example                    # Comprehensive environment variable reference
 ├── setup_alpine.sh                 # One-click Alpine Linux dependency installer
 ├── start_backend.sh                # Script to start Flask on 0.0.0.0:5000
 ├── start_frontend.sh               # Script to start Streamlit on 0.0.0.0:8501
@@ -143,7 +144,7 @@ XenLearn/
 ## 4. Database Schema & Migration Details
 
 ### Existing Records Preserved:
-- **Database:** `elearning` on `10.240.109.248:3306`
+- **Database:** `elearning` on `10.189.191.248:3306`
 - **User:** `elearning` / `elearning123`
 - **Sample Student:** `Student One` (`student@example.com`)
 - **Sample Course:** `Introduction to E-Learning`
@@ -160,7 +161,7 @@ XenLearn/
 
 ## 5. Alpine Linux Installation & Deployment Guide
 
-Follow these steps on **VM 2: Alpine-Linux-New** (`10.240.109.51`).
+Follow these steps on **VM 2: Alpine-Linux** (`10.189.191.51`).
 
 ### Step 1: Update System & Install Dependencies
 Run in the Alpine Linux terminal:
@@ -172,7 +173,7 @@ apk add python3 py3-pip py3-virtualenv gcc musl-dev python3-dev libffi-dev maria
 
 ### Step 2: Create Python Virtual Environment
 ```bash
-cd /opt/XenLearn   # Or your project directory
+cd /opt/elearning   # Or your project directory
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -188,12 +189,12 @@ pip install -r frontend/requirements.txt
 Verify network connectivity to the database VM and apply the migration:
 ```bash
 # Verify TCP connectivity from VM 2 to VM 1
-nc -zv 10.240.109.248 3306
+nc -zv 10.189.191.248 3306
 
 # Run the automated migration script
 python3 database/apply_migrations.py
 ```
-*Expected output: `[SUCCESS] Database is fully synchronized and ready for backend operations!`*
+*Expected output: `[SUCCESS] 8 migration statements processed successfully!`*
 
 ---
 
@@ -222,16 +223,9 @@ To access the platform from another laptop connected to the same network:
 1. Open your web browser (Chrome, Firefox, Edge, Safari).
 2. Enter the URL:
    ```
-   http://10.240.109.51:8501
+   http://10.189.191.51:8501
    ```
 3. You will see the **Xen E-Learning Platform** login portal.
-
-### Optional: Nginx Reverse Proxy (Port 80)
-If you prefer accessing via standard HTTP port 80 (`http://10.240.109.51/`):
-```bash
-cp nginx/elearning.conf /etc/nginx/http.d/elearning.conf
-rc-service nginx restart
-```
 
 ---
 
@@ -252,101 +246,69 @@ All endpoints can be verified using `curl` from any computer:
 
 ### 1. Health Check
 ```bash
-curl -s http://10.240.109.51:5000/api/health
+curl -s http://10.189.191.51:5000/api/health
 ```
 
 ### 2. User Authentication
 ```bash
-curl -s -X POST http://10.240.109.51:5000/api/login \
+curl -s -X POST http://10.189.191.51:5000/api/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@elearning.local", "password":"Admin@123"}'
 ```
 
 ### 3. Dashboard Real Metrics
 ```bash
-curl -s http://10.240.109.51:5000/api/dashboard
+curl -s http://10.189.191.51:5000/api/dashboard
 ```
 
 ### 4. Course Management
 ```bash
-# List all courses
-curl -s http://10.240.109.51:5000/api/courses
-
-# Create a new course
-curl -s -X POST http://10.240.109.51:5000/api/courses \
-  -H "Content-Type: application/json" \
-  -d '{"course_code":"CS-201", "title":"Cloud Virtualization", "description":"Hands-on Xen and XCP-ng"}'
-
-# Update a course
-curl -s -X PUT http://10.240.109.51:5000/api/courses/1 \
-  -H "Content-Type: application/json" \
-  -d '{"course_code":"CS-101", "title":"Introduction to E-Learning (Updated)", "description":"Updated description"}'
-
-# Delete a course
-curl -s -X DELETE http://10.240.109.51:5000/api/courses/2
+curl -s http://10.189.191.51:5000/api/courses
 ```
 
 ### 5. Student Management
 ```bash
-# List all students
-curl -s http://10.240.109.51:5000/api/students
-
-# Register a student
-curl -s -X POST http://10.240.109.51:5000/api/students \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Alice Smith", "email":"alice@example.com", "password":"Student@123"}'
-
-# Inspect student details & enrolled coursework
-curl -s http://10.240.109.51:5000/api/students/1
+curl -s http://10.189.191.51:5000/api/students
 ```
 
 ### 6. Course Enrollment
 ```bash
-# Enroll student 1 into course 1
-curl -s -X POST http://10.240.109.51:5000/api/enrollments \
-  -H "Content-Type: application/json" \
-  -d '{"student_id": 1, "course_id": 1}'
-
-# View all enrollments
-curl -s http://10.240.109.51:5000/api/enrollments
-
-# View student-specific enrollments
-curl -s http://10.240.109.51:5000/api/students/1/enrollments
+curl -s http://10.189.191.51:5000/api/enrollments
 ```
 
 ### 7. Xen Virtualization Telemetry
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/status
+curl -s http://10.189.191.51:5000/api/xen/status
 ```
 
 ### 8. Real-Time Consolidated Xen Metrics
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/metrics
+curl -s http://10.189.191.51:5000/api/xen/metrics
 ```
 
 ### 9. Hypervisor Host Hardware Metrics
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/host
+curl -s http://10.189.191.51:5000/api/xen/host
 ```
 
 ### 10. Discovered Virtual Machines
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/vms
+curl -s http://10.189.191.51:5000/api/xen/vms
 ```
 
 ### 11. Single VM Runtime Telemetry (App VM or DB VM)
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/vms/Alpine-Linux-New/metrics
+curl -s http://10.189.191.51:5000/api/xen/vms/Alpine-Linux/metrics
 ```
 
 ### 12. Monitoring Daemon Health & Status
 ```bash
-curl -s http://10.240.109.51:5000/api/xen/monitor/status
+curl -s http://10.189.191.51:5000/api/xen/monitor/status
 ```
 
 ### 13. Historical Telemetry for Time-Series Charting
 ```bash
-curl -s "http://10.240.109.51:5000/api/xen/history?limit=20"
+curl -s "http://10.189.191.51:5000/api/xen/history?limit=50"
 ```
 
 ---
@@ -357,13 +319,13 @@ The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scala
 
 ### Phase 1: Decoupled Multi-VM Architecture (Complete)
 - Responsive e-learning web application running across two Alpine Linux VMs (Application Server & MariaDB Database Server).
-- Private virtual bridged networking with 100% verified zero packet loss.
+- Private virtual bridged networking with verified zero packet loss.
 
 ### Phase 2: Real-Time Xen/XCP-ng Resource Monitoring (Complete)
 Implemented in `xen_monitor/`:
 1. **XCP-ng XAPI Client (`xen_api_client.py`):**
-   - Connects to XCP-ng hypervisor (`10.240.109.196`) over XML-RPC (port 443/80) with timeout socket transports.
-   - Dynamically discovers guest VM UUIDs by name (`Alpine-Linux-New` and `Alpine-DB`).
+   - Connects to XCP-ng hypervisor (`10.189.191.175`) over XML-RPC (port 443/80) with timeout socket transports.
+   - Dynamically discovers guest VM UUIDs by actual Xen name (`Alpine-Linux` and `Alpine-DB`).
    - Retrieves host hardware cores, CPU load, total/free RAM, and running VM count.
    - Extracts VM vCPU counts, allocated RAM, guest memory usage, and VIF network RX/TX bytes.
 2. **Metric Normalization & Rate Tracking (`vm_metrics.py`, `network_monitor.py`):**
@@ -377,18 +339,17 @@ Implemented in `xen_monitor/`:
 
 ### Phase 3: Elasticity Recommendation Engine (Prepared & Non-Destructive)
 Implemented in `xen_monitor/allocation_engine.py`:
-- **CPU Scaling Rules:** Recommends scaling vCPUs up when CPU utilization exceeds 80%; recommends scaling down when utilization falls below 20%.
-- **Memory Scaling Rules:** Recommends ballooning RAM by +512 MB when RAM utilization exceeds 85%.
+- **CPU Scaling Rules:** Recommends scaling vCPUs up when CPU utilization exceeds 75%; recommends scaling down when utilization falls below 25%.
+- **Memory Scaling Rules:** Recommends ballooning RAM by +512 MB when RAM utilization exceeds 80%.
 - **Safety Hysteresis:** Enforces minimum/maximum hardware bounds and a 60-second cooldown period to prevent resource flapping.
 - **Safety Guarantee:** Phase 2 recommendations are purely advisory and logged to MariaDB; no automatic reboots or hypervisor reconfigurations occur.
 
 ---
 
-## 11. Running Unit Tests
+## 11. Running Automated Tests
 
-Run the automated test suite covering Phase 1 REST APIs and Phase 2 Xen monitoring engine:
+Run the complete automated test suite covering Phase 1 REST APIs and Phase 2 Xen monitoring engine:
 ```bash
 python3 -m unittest discover tests
 ```
-*Result: 22/22 tests passing.*
-
+*Result: 30/30 tests passing.*

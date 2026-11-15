@@ -234,21 +234,64 @@ class XenAPIClient:
         return result
 
     def get_vm_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """Find a VM dynamically by its exact or partial name_label."""
+        """
+        Find a VM dynamically by its exact or case-insensitive name_label.
+        Supports exact match first, case-insensitive match, and normalized alias matching.
+        """
+        if not name:
+            return None
+
         vms = self.get_all_vms()
+        clean_target = name.strip()
+        logger.debug(f"Looking up VM '{clean_target}' among {len(vms)} discovered VMs...")
+
+        # 1. Exact match
         for vm in vms:
-            if vm["name"].lower() == name.lower():
+            if vm.get("name") == clean_target:
+                logger.info(f"Exact match found for VM '{clean_target}' (UUID: {vm.get('uuid')})")
                 return vm
-        # Try substring match
+
+        # 2. Case-insensitive exact match
         for vm in vms:
-            if name.lower() in vm["name"].lower():
+            if vm.get("name", "").lower() == clean_target.lower():
+                logger.info(f"Case-insensitive match found for VM '{clean_target}' -> '{vm.get('name')}' (UUID: {vm.get('uuid')})")
                 return vm
+
+        # 3. Known alias / legacy name mapping (Alpine-Linux <-> Alpine-Linux-New)
+        alias_map = {
+            "alpine-linux-new": "alpine-linux",
+            "alpine-linux": "alpine-linux-new"
+        }
+        alt_target = alias_map.get(clean_target.lower())
+        if alt_target:
+            for vm in vms:
+                if vm.get("name", "").lower() == alt_target:
+                    logger.info(f"Alias match found for VM '{clean_target}' -> '{vm.get('name')}' (UUID: {vm.get('uuid')})")
+                    return vm
+
+        # 4. Normalized whitespace / hyphen match
+        norm_target = clean_target.lower().replace("-", "").replace("_", "").replace(" ", "")
+        for vm in vms:
+            vm_norm = vm.get("name", "").lower().replace("-", "").replace("_", "").replace(" ", "")
+            if vm_norm == norm_target:
+                logger.info(f"Normalized match found for VM '{clean_target}' -> '{vm.get('name')}' (UUID: {vm.get('uuid')})")
+                return vm
+
+        # 5. Substring match as last resort
+        for vm in vms:
+            if clean_target.lower() in vm.get("name", "").lower():
+                logger.info(f"Substring match found for VM '{clean_target}' in '{vm.get('name')}' (UUID: {vm.get('uuid')})")
+                return vm
+
+        available_names = [v.get("name") for v in vms]
+        logger.warning(f"VM '{clean_target}' was not discovered on XCP-ng host. Available VMs: {available_names}")
         return None
 
     def get_vm_runtime_metrics(self, vm_info: Dict[str, Any]) -> Dict[str, Any]:
         """
         Query runtime metrics (CPU utilization %, Memory utilization %, Network RX/TX)
         for a discovered VM using VM_metrics, VM_guest_metrics, and VIFs.
+        Handles missing or optional metrics gracefully without crashing or failing discovery.
         """
         if not self.is_connected or not self.proxy or not self.session_id:
             raise ConnectionError(self.last_error or "XAPI client not connected")
@@ -264,33 +307,39 @@ class XenAPIClient:
         # 1. Read VM_metrics (Hypervisor level)
         metrics_ref = vm_info.get("metrics_ref")
         if metrics_ref and metrics_ref != "OpaqueRef:NULL":
-            m_res = self.proxy.VM_metrics.get_record(self.session_id, metrics_ref)
-            if m_res.get("Status") == "Success":
-                m_data = m_res.get("Value", {})
-                # CPU utilization map: {0: 0.15, 1: 0.25}
-                vcpu_utils = m_data.get("VCPUs_utilisation", {})
-                if vcpu_utils:
-                    vals = [float(v) * 100.0 if float(v) <= 1.0 else float(v) for v in vcpu_utils.values()]
-                    cpu_percent = round(sum(vals) / len(vals), 1)
+            try:
+                m_res = self.proxy.VM_metrics.get_record(self.session_id, metrics_ref)
+                if m_res.get("Status") == "Success":
+                    m_data = m_res.get("Value", {})
+                    vcpu_utils = m_data.get("VCPUs_utilisation", {})
+                    if vcpu_utils:
+                        vals = [float(v) * 100.0 if float(v) <= 1.0 else float(v) for v in vcpu_utils.values()]
+                        cpu_percent = round(sum(vals) / len(vals), 1)
 
-                mem_actual = int(m_data.get("memory_actual", 0))
-                if mem_actual > 0:
-                    allocated_ram_mb = round(mem_actual / (1024 * 1024), 1)
+                    mem_actual = int(m_data.get("memory_actual", 0))
+                    if mem_actual > 0:
+                        allocated_ram_mb = round(mem_actual / (1024 * 1024), 1)
+                    logger.debug(f"Retrieved hypervisor metrics for {vm_info.get('name')}: CPU={cpu_percent}%, AllocatedRAM={allocated_ram_mb}MB")
+            except Exception as e:
+                logger.warning(f"Error querying VM_metrics for {vm_info.get('name')}: {e}")
 
         # 2. Read VM_guest_metrics (Guest OS level if xen-tools/balloon active)
         guest_ref = vm_info.get("guest_metrics_ref")
         if guest_ref and guest_ref != "OpaqueRef:NULL":
-            gm_res = self.proxy.VM_guest_metrics.get_record(self.session_id, guest_ref)
-            if gm_res.get("Status") == "Success":
-                gm_data = gm_res.get("Value", {})
-                mem_map = gm_data.get("memory", {})
-                # memory map may have 'free' and 'total'
-                if "free" in mem_map and "total" in mem_map:
-                    g_total = float(mem_map["total"])
-                    g_free = float(mem_map["free"])
-                    g_used = max(0.0, g_total - g_free)
-                    used_ram_mb = round(g_used / (1024 * 1024), 1)
-                    ram_percent = round((g_used / g_total * 100), 1) if g_total > 0 else 0.0
+            try:
+                gm_res = self.proxy.VM_guest_metrics.get_record(self.session_id, guest_ref)
+                if gm_res.get("Status") == "Success":
+                    gm_data = gm_res.get("Value", {})
+                    mem_map = gm_data.get("memory", {})
+                    if "free" in mem_map and "total" in mem_map:
+                        g_total = float(mem_map["total"])
+                        g_free = float(mem_map["free"])
+                        g_used = max(0.0, g_total - g_free)
+                        used_ram_mb = round(g_used / (1024 * 1024), 1)
+                        ram_percent = round((g_used / g_total * 100), 1) if g_total > 0 else 0.0
+                        logger.debug(f"Retrieved guest memory metrics for {vm_info.get('name')}: UsedRAM={used_ram_mb}MB ({ram_percent}%)")
+            except Exception as e:
+                logger.debug(f"Guest metrics unavailable for {vm_info.get('name')}: {e}")
 
         # If guest metrics are not reporting exact free RAM, estimate from dynamic target vs memory_actual
         if ram_percent == 0.0 and allocated_ram_mb > 0:
@@ -302,16 +351,21 @@ class XenAPIClient:
         # 3. Read Network Virtual Interfaces (VIF metrics)
         vif_refs = vm_info.get("vifs", [])
         for vif_ref in vif_refs:
-            vif_res = self.proxy.VIF.get_record(self.session_id, vif_ref)
-            if vif_res.get("Status") == "Success":
-                vif_data = vif_res.get("Value", {})
-                vm_m_ref = vif_data.get("metrics")
-                if vm_m_ref and vm_m_ref != "OpaqueRef:NULL":
-                    vifm_res = self.proxy.VIF_metrics.get_record(self.session_id, vm_m_ref)
-                    if vifm_res.get("Status") == "Success":
-                        vif_metrics = vifm_res.get("Value", {})
-                        net_rx_bytes += int(float(vif_metrics.get("io_read_kbs", 0.0)) * 1024)
-                        net_tx_bytes += int(float(vif_metrics.get("io_write_kbs", 0.0)) * 1024)
+            try:
+                vif_res = self.proxy.VIF.get_record(self.session_id, vif_ref)
+                if vif_res.get("Status") == "Success":
+                    vif_data = vif_res.get("Value", {})
+                    vm_m_ref = vif_data.get("metrics")
+                    if vm_m_ref and vm_m_ref != "OpaqueRef:NULL":
+                        vifm_res = self.proxy.VIF_metrics.get_record(self.session_id, vm_m_ref)
+                        if vifm_res.get("Status") == "Success":
+                            vif_metrics = vifm_res.get("Value", {})
+                            net_rx_bytes += int(float(vif_metrics.get("io_read_kbs", 0.0)) * 1024)
+                            net_tx_bytes += int(float(vif_metrics.get("io_write_kbs", 0.0)) * 1024)
+            except Exception as e:
+                logger.debug(f"Error querying VIF {vif_ref} for {vm_info.get('name')}: {e}")
+
+        logger.debug(f"Normalized metrics for {vm_info.get('name')}: CPU={cpu_percent}%, RAM={ram_percent}%, NetRX={net_rx_bytes}, NetTX={net_tx_bytes}")
 
         return {
             "uuid": vm_info["uuid"],

@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from frontend.api import api_get_health, api_get_dashboard
 from frontend.components.cards import render_section_title, render_metric_card
@@ -9,6 +10,14 @@ def render_admin_page():
     if user.get("role") != "admin":
         st.warning("⚠️ Access restricted to Administrators.")
         return
+
+    # Dynamic Infrastructure Configuration
+    app_name = os.getenv("APP_VM_NAME", "Alpine-Linux")
+    app_ip = os.getenv("APP_VM_IP", "10.189.191.51")
+    db_name = os.getenv("DB_VM_NAME", "Alpine-DB")
+    db_ip = os.getenv("DB_VM_IP", "10.189.191.248")
+    db_port = os.getenv("DB_PORT", "3306")
+    xcp_host = os.getenv("XCP_NG_HOST", "10.189.191.175")
 
     # Diagnostic Health Check
     health = api_get_health()
@@ -22,7 +31,7 @@ def render_admin_page():
                 {'✅ System Operational - MariaDB Connected' if db_ok else '⚠️ Database Connection Warning'}
             </div>
             <div style="font-size:0.85rem; color:#475569; margin-top:4px;">
-                Application Server: <b>Alpine-Linux-New (10.240.109.51)</b> | Target Database: <b>Alpine-DB (10.240.109.248:3306)</b>
+                Application Server: <b>{app_name} ({app_ip})</b> | Target Database: <b>{db_name} ({db_ip}:{db_port})</b>
             </div>
         </div>
         """,
@@ -41,7 +50,7 @@ def render_admin_page():
         with c3:
             render_metric_card("Enrollments", stats.get("total_enrollments", 0), "Total records")
         with c4:
-            render_metric_card("Xen Host", "XCP-ng", "10.240.109.196")
+            render_metric_card("Xen Host", "XCP-ng", xcp_host)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### ⚡ **Administrative Shortcuts**")

@@ -1,7 +1,7 @@
 #!/bin/sh
 # ==============================================================================
 # Setup & Dependency Installation Script for Alpine Linux 3.24
-# Target VM: Alpine-Linux-New (10.240.109.51)
+# Target VM: Application VM (Alpine-Linux)
 # ==============================================================================
 
 set -e
@@ -44,4 +44,3 @@ echo "1. Run database migration: python3 database/apply_migrations.py"
 echo "2. Start Backend:          ./start_backend.sh"
 echo "3. Start Frontend:         ./start_frontend.sh"
 echo "=================================================================="
-

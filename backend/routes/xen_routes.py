@@ -126,17 +126,28 @@ def xen_monitor_status():
 @xen_bp.route("/history", methods=["GET"])
 def xen_history():
     """
-    GET /api/xen/history?vm_name=...&limit=50
+    GET /api/xen/history?limit=50&vm_name=...
     Returns historical telemetry records from the database for time-series charting.
     """
     try:
         vm_name = request.args.get("vm_name")
-        limit = int(request.args.get("limit", 50))
+        limit_arg = request.args.get("limit", 50)
+        try:
+            limit = int(limit_arg)
+        except (ValueError, TypeError):
+            limit = 50
+
         history_data = get_metrics_history(vm_name=vm_name, limit=limit)
         return jsonify({
             "success": True,
             "count": len(history_data),
-            "data": history_data
+            "data": history_data or []
         }), 200
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # Avoid exposing credentials or internal stack traces
+        return jsonify({
+            "success": True,
+            "count": 0,
+            "data": [],
+            "warning": "Historical telemetry data temporarily unavailable."
+        }), 200

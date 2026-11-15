@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 # Load environment configuration
 load_dotenv()
 
-DB_HOST = os.getenv("DB_HOST", "10.240.109.248")
+DB_HOST = os.getenv("DB_HOST", "10.189.191.248")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "elearning")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "elearning123")
@@ -61,6 +61,20 @@ def inspect_database(conn):
             print(f"  * Table `{table}`: {len(columns)} columns {col_names} | {cnt} records")
 
 
+def parse_sql_statements(sql_content: str):
+    """Safely split SQL content by semicolon while stripping line comments."""
+    statements = []
+    for raw_stmt in sql_content.split(";"):
+        lines = [
+            line for line in raw_stmt.splitlines()
+            if not line.strip().startswith("--") and not line.strip().startswith("/*")
+        ]
+        cleaned_stmt = "\n".join(lines).strip()
+        if cleaned_stmt and not cleaned_stmt.upper().startswith("USE "):
+            statements.append(cleaned_stmt)
+    return statements
+
+
 def run_migrations(conn):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     migration_file = os.path.join(script_dir, "migrations.sql")
@@ -73,21 +87,17 @@ def run_migrations(conn):
     with open(migration_file, "r", encoding="utf-8") as f:
         sql_content = f.read()
 
-    # Split commands by semicolon (ignoring comments and empty statements)
-    statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
+    statements = parse_sql_statements(sql_content)
 
     with conn.cursor() as cursor:
         for stmt in statements:
-            # Skip comments or USE statement
-            if stmt.upper().startswith("USE ") or stmt.startswith("--"):
-                continue
             try:
                 cursor.execute(stmt)
             except pymysql.MySQLError as err:
-                # Catch benign warnings like column already exists
+                # Catch benign notices like column/index already exists
                 print(f"[NOTICE] Statement notice: {err}")
 
-    print("[SUCCESS] Migrations applied successfully!")
+    print(f"[SUCCESS] {len(statements)} migration statements processed successfully!")
     return True
 
 

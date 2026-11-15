@@ -2,8 +2,10 @@
 Streamlit Page: Xen Resource Monitoring
 Displays live hypervisor and VM CPU, RAM, Network telemetry, historical charts,
 and dynamic elasticity recommendations.
+Configured dynamically through environment variables and backend API.
 """
 
+import os
 import time
 import pandas as pd
 import streamlit as st
@@ -49,6 +51,13 @@ def render_xen_monitoring_page():
     if status_resp.get("success"):
         status_data = status_resp.get("data", {})
 
+    # Dynamic target configurations from backend or environment
+    config_data = status_data.get("config", {})
+    target_app_name = config_data.get("app_vm_name") or os.getenv("APP_VM_NAME", "Alpine-Linux")
+    target_db_name = config_data.get("db_vm_name") or os.getenv("DB_VM_NAME", "Alpine-DB")
+    target_xcp_host = config_data.get("xcp_host") or os.getenv("XCP_NG_HOST", "10.189.191.175")
+    poll_interval = config_data.get("poll_interval_sec") or os.getenv("MONITOR_INTERVAL", "5")
+
     # Connection Status Banner
     last_update = metrics_data.get("last_successful_update_iso") or "Never"
     if is_online:
@@ -59,8 +68,8 @@ def render_xen_monitoring_page():
                     🟢 XCP-ng Hypervisor: Online & Connected
                 </div>
                 <div style="font-size:0.85rem; color:#475569; margin-top:4px;">
-                    Host: <b>{metrics_data.get('hypervisor', {}).get('ip', 'N/A')}</b> |
-                    Last Successful Update: <b>{last_update}</b> | Polling Interval: <b>5s</b>
+                    Host IP: <b>{metrics_data.get('hypervisor', {}).get('ip') or target_xcp_host}</b> |
+                    Last Successful Update: <b>{last_update}</b> | Polling Interval: <b>{poll_interval}s</b>
                 </div>
             </div>
             """,
@@ -75,8 +84,8 @@ def render_xen_monitoring_page():
                     🔴 XCP-ng Monitoring: Offline / Disconnected
                 </div>
                 <div style="font-size:0.85rem; color:#475569; margin-top:4px;">
-                    Target Host: <b>{status_data.get('config', {}).get('xcp_host', '10.240.109.196')}</b> |
-                    Reason: <code>{err_msg}</code>
+                    Target Host: <b>{target_xcp_host}</b> |
+                    Diagnostics: <code>{err_msg}</code>
                 </div>
                 <div style="font-size:0.8rem; color:#6B7280; margin-top:6px;">
                     <i>Note: Per system specifications, no simulated or fabricated data is displayed.
@@ -92,15 +101,17 @@ def render_xen_monitoring_page():
     host = metrics_data.get("hypervisor") if is_online else None
 
     if host:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            render_metric_card("Host CPU Cores", host.get("total_cpu_cores", 0), "Physical CPU cores")
+            render_metric_card("CPU Cores", host.get("total_cpu_cores", 0), "Physical host cores")
         with c2:
-            render_metric_card("Host CPU Load", f"{host.get('cpu_percent', 0.0)}%", "Aggregate CPU utilization")
+            render_metric_card("Host CPU Load", f"{host.get('cpu_percent', 0.0)}%", "Core utilization")
         with c3:
-            render_metric_card("Total Physical RAM", f"{host.get('total_ram_mb', 0.0)} MB", f"Used: {host.get('used_ram_mb', 0.0)} MB")
+            render_metric_card("Physical RAM", f"{host.get('total_ram_mb', 0.0)} MB", f"Total installed")
         with c4:
-            render_metric_card("Active Virtual Machines", host.get("running_vms", 0), f"Total provisioned: {host.get('total_vms', 0)}")
+            render_metric_card("Used / Free RAM", f"{host.get('used_ram_mb', 0.0)} MB", f"Free: {host.get('available_ram_mb', 0.0)} MB")
+        with c5:
+            render_metric_card("Active VMs", host.get("running_vms", 0), f"Total: {host.get('total_vms', 0)}")
 
         # Host Progress Bars
         pcol1, pcol2 = st.columns(2)
@@ -110,7 +121,8 @@ def render_xen_monitoring_page():
             st.progress(cpu_val / 100.0)
         with pcol2:
             ram_val = min(100.0, max(0.0, float(host.get("ram_percent", 0.0))))
-            st.caption(f"Host RAM Utilization: **{ram_val}%** ({host.get('used_ram_mb', 0)}MB / {host.get('total_ram_mb', 0)}MB)")
+            free_ram = host.get("available_ram_mb", 0.0)
+            st.caption(f"Host RAM Utilization: **{ram_val}%** (Used: {host.get('used_ram_mb', 0)} MB / Free: {free_ram} MB)")
             st.progress(ram_val / 100.0)
     else:
         st.info("Host hypervisor live metrics unavailable while disconnected from XCP-ng XAPI.")
@@ -120,69 +132,119 @@ def render_xen_monitoring_page():
     # 2. Virtual Machines Real-Time Metrics
     st.markdown("### 📦 **Virtual Machines Real-Time Telemetry**")
     vms_dict = metrics_data.get("vms", {}) if is_online else {}
-    app_vm = vms_dict.get("Alpine-Linux-New", {})
-    db_vm = vms_dict.get("Alpine-DB", {})
+
+    def lookup_vm(vms_map, target_name):
+        if not vms_map:
+            return {}
+        # 1. Exact match
+        if target_name in vms_map:
+            return vms_map[target_name]
+        # 2. Case-insensitive exact match
+        for k, v in vms_map.items():
+            if k.lower() == target_name.lower():
+                return v
+        # 3. Alias fallback (e.g. Alpine-Linux <-> Alpine-Linux-New)
+        alias_map = {"alpine-linux-new": "alpine-linux", "alpine-linux": "alpine-linux-new"}
+        alt = alias_map.get(target_name.lower())
+        if alt:
+            for k, v in vms_map.items():
+                if k.lower() == alt:
+                    return v
+        # 4. Normalized match
+        norm_t = target_name.lower().replace("-", "").replace("_", "").replace(" ", "")
+        for k, v in vms_map.items():
+            if k.lower().replace("-", "").replace("_", "").replace(" ", "") == norm_t:
+                return v
+        return {}
+
+    app_vm = lookup_vm(vms_dict, target_app_name)
+    db_vm = lookup_vm(vms_dict, target_db_name)
+
+    app_display_name = app_vm.get("name") or target_app_name
+    db_display_name = db_vm.get("name") or target_db_name
 
     col_app, col_db = st.columns(2)
 
     with col_app:
+        app_power = app_vm.get("power_state", "Unknown") if app_vm else "Offline"
+        app_power_badge = "🟢 Running" if app_power == "Running" else f"🔴 {app_power}"
         st.markdown(
-            """
+            f"""
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-top:4px solid #2563EB; padding:16px; border-radius:8px; margin-bottom:12px;">
-                <h4 style="margin:0 0 6px 0; color:#1E40AF;">🚀 Application VM: Alpine-Linux-New</h4>
-                <div style="font-size:0.8rem; color:#64748B;">Role: Flask API (5000) + Streamlit UI (8501)</div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h4 style="margin:0; color:#1E40AF;">🚀 Application VM: {app_display_name}</h4>
+                    <span style="font-size:0.8rem; font-weight:600; padding:2px 8px; border-radius:12px; background:#EFF6FF; color:#1E40AF;">{app_power_badge}</span>
+                </div>
+                <div style="font-size:0.8rem; color:#64748B; margin-top:4px;">
+                    UUID: <code>{app_vm.get('uuid', 'Dynamic Discovery')}</code> | Role: Flask API (5000) + Streamlit UI (8501)
+                </div>
             </div>
             """,
             unsafe_allow_html=True
         )
-        if app_vm and app_vm.get("status") == "online":
+        if app_vm and (app_vm.get("status") == "online" or app_vm.get("power_state") == "Running"):
             mc1, mc2 = st.columns(2)
             with mc1:
-                render_metric_card("Configured vCPUs", app_vm.get("vcpu_count", 1), f"Load: {app_vm.get('cpu_percent', 0.0)}%")
+                render_metric_card("Configured vCPUs", app_vm.get("vcpu_count", 1), f"Current Load: {app_vm.get('cpu_percent', 0.0)}%")
             with mc2:
-                render_metric_card("Memory Allocated", f"{app_vm.get('allocated_ram_mb', 0)} MB", f"Used: {app_vm.get('used_ram_mb', 0)} MB")
+                render_metric_card("Memory Allocation", f"{app_vm.get('allocated_ram_mb', 0)} MB", f"Used: {app_vm.get('used_ram_mb', 0)} MB ({app_vm.get('ram_percent', 0.0)}%)")
 
             app_cpu = min(100.0, max(0.0, float(app_vm.get("cpu_percent", 0.0))))
             app_ram = min(100.0, max(0.0, float(app_vm.get("ram_percent", 0.0))))
-            st.caption(f"App VM CPU Usage: **{app_cpu}%**")
+            st.caption(f"App VM CPU Utilization: **{app_cpu}%**")
             st.progress(app_cpu / 100.0)
-            st.caption(f"App VM RAM Usage: **{app_ram}%**")
+            st.caption(f"App VM RAM Utilization: **{app_ram}%**")
             st.progress(app_ram / 100.0)
-            st.caption(f"Network Throughput: **{app_vm.get('network_rate_human', 'N/A')}**")
+            
+            rx_b = app_vm.get("network_rx_bytes", 0)
+            tx_b = app_vm.get("network_tx_bytes", 0)
+            st.caption(f"Network I/O: **RX: {round(rx_b / 1024 / 1024, 2)} MB** | **TX: {round(tx_b / 1024 / 1024, 2)} MB** ({app_vm.get('network_rate_human', 'Active')})")
         else:
-            st.warning("Alpine-Linux-New telemetry offline or VM not discovered.")
+            reason = app_vm.get("reason") if app_vm else f"VM named '{app_display_name}' not discovered on XCP-ng host."
+            st.warning(f"{app_display_name} telemetry unavailable: {reason}")
 
     with col_db:
+        db_power = db_vm.get("power_state", "Unknown") if db_vm else "Offline"
+        db_power_badge = "🟢 Running" if db_power == "Running" else f"🔴 {db_power}"
         st.markdown(
-            """
+            f"""
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-top:4px solid #059669; padding:16px; border-radius:8px; margin-bottom:12px;">
-                <h4 style="margin:0 0 6px 0; color:#065F46;">🗄️ Database VM: Alpine-DB</h4>
-                <div style="font-size:0.8rem; color:#64748B;">Role: MariaDB 11.8.9 (Port 3306)</div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h4 style="margin:0; color:#065F46;">🗄️ Database VM: {db_display_name}</h4>
+                    <span style="font-size:0.8rem; font-weight:600; padding:2px 8px; border-radius:12px; background:#ECFDF5; color:#065F46;">{db_power_badge}</span>
+                </div>
+                <div style="font-size:0.8rem; color:#64748B; margin-top:4px;">
+                    UUID: <code>{db_vm.get('uuid', 'Dynamic Discovery')}</code> | Role: MariaDB 11.8.9 (Port 3306)
+                </div>
             </div>
             """,
             unsafe_allow_html=True
         )
-        if db_vm and db_vm.get("status") == "online":
+        if db_vm and (db_vm.get("status") == "online" or db_vm.get("power_state") == "Running"):
             mc1, mc2 = st.columns(2)
             with mc1:
-                render_metric_card("Configured vCPUs", db_vm.get("vcpu_count", 1), f"Load: {db_vm.get('cpu_percent', 0.0)}%")
+                render_metric_card("Configured vCPUs", db_vm.get("vcpu_count", 1), f"Current Load: {db_vm.get('cpu_percent', 0.0)}%")
             with mc2:
-                render_metric_card("Memory Allocated", f"{db_vm.get('allocated_ram_mb', 0)} MB", f"Used: {db_vm.get('used_ram_mb', 0)} MB")
+                render_metric_card("Memory Allocation", f"{db_vm.get('allocated_ram_mb', 0)} MB", f"Used: {db_vm.get('used_ram_mb', 0)} MB ({db_vm.get('ram_percent', 0.0)}%)")
 
             db_cpu = min(100.0, max(0.0, float(db_vm.get("cpu_percent", 0.0))))
             db_ram = min(100.0, max(0.0, float(db_vm.get("ram_percent", 0.0))))
-            st.caption(f"DB VM CPU Usage: **{db_cpu}%**")
+            st.caption(f"DB VM CPU Utilization: **{db_cpu}%**")
             st.progress(db_cpu / 100.0)
-            st.caption(f"DB VM RAM Usage: **{db_ram}%**")
+            st.caption(f"DB VM RAM Utilization: **{db_ram}%**")
             st.progress(db_ram / 100.0)
-            st.caption(f"Network Throughput: **{db_vm.get('network_rate_human', 'N/A')}**")
+
+            rx_b = db_vm.get("network_rx_bytes", 0)
+            tx_b = db_vm.get("network_tx_bytes", 0)
+            st.caption(f"Network I/O: **RX: {round(rx_b / 1024 / 1024, 2)} MB** | **TX: {round(tx_b / 1024 / 1024, 2)} MB** ({db_vm.get('network_rate_human', 'Active')})")
         else:
-            st.warning("Alpine-DB telemetry offline or VM not discovered.")
+            reason = db_vm.get("reason") if db_vm else f"VM named '{db_display_name}' not discovered on XCP-ng host."
+            st.warning(f"{db_display_name} telemetry unavailable: {reason}")
 
     st.markdown("---")
 
     # 3. Side-by-Side Comparison Table
-    st.markdown("### 📊 **Virtual Machine Resource Allocations & Status**")
+    st.markdown("### 📊 **Virtual Machine Resource Allocations & Comparison**")
     all_vms = metrics_data.get("all_discovered_vms", [])
     if all_vms:
         df_vms = pd.DataFrame(all_vms)
@@ -192,9 +254,9 @@ def render_xen_monitoring_page():
 
     st.markdown("---")
 
-    # 4. Dynamic Allocation Recommendations (Phase 3 Preparation)
-    st.markdown("### ⚖️ **Dynamic Elasticity & Allocation Recommendations (Phase 3 Prep)**")
-    st.caption("Rule-based elasticity policies evaluated in real-time with anti-thrashing cooldown timers.")
+    # 4. Dynamic Allocation Recommendations (Phase 3 Preparation - READ ONLY)
+    st.markdown("### ⚖️ **Dynamic Elasticity Recommendations (Phase 3 Preparation - Read-Only)**")
+    st.caption("Threshold-based elasticity model with anti-thrashing cooldown timers. Advisory recommendations only; no automated VM resizing or reboots.")
 
     recommendations = metrics_data.get("recommendations", {})
     if recommendations:
@@ -220,7 +282,7 @@ def render_xen_monitoring_page():
                     unsafe_allow_html=True
                 )
     else:
-        st.info("Recommendations will be computed as soon as telemetry streams from XCP-ng.")
+        st.info("Recommendations will be evaluated once live telemetry is received from XCP-ng.")
 
     st.markdown("---")
 
@@ -235,21 +297,42 @@ def render_xen_monitoring_page():
         df_hist = pd.DataFrame(history_records)
         df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
 
-        tab_cpu, tab_ram, tab_net = st.tabs(["CPU Utilization (%)", "RAM Utilization (%)", "Network Traffic (Bytes)"])
+        tab_cpu, tab_ram, tab_net, tab_comp = st.tabs([
+            "CPU Utilization (%)",
+            "RAM Utilization (%)",
+            "Network Traffic (Bytes)",
+            "VM Comparison Snapshot"
+        ])
 
         with tab_cpu:
-            pivot_cpu = df_hist.pivot_table(index="timestamp", columns="vm_name", values="cpu_percent", aggfunc="mean").fillna(method="ffill")
-            st.line_chart(pivot_cpu, use_container_width=True)
+            try:
+                pivot_cpu = df_hist.pivot_table(index="timestamp", columns="vm_name", values="cpu_percent", aggfunc="mean").bfill().ffill()
+                st.line_chart(pivot_cpu, use_container_width=True)
+            except Exception as e:
+                st.line_chart(df_hist[["timestamp", "cpu_percent"]].set_index("timestamp"), use_container_width=True)
 
         with tab_ram:
-            pivot_ram = df_hist.pivot_table(index="timestamp", columns="vm_name", values="ram_percent", aggfunc="mean").fillna(method="ffill")
-            st.line_chart(pivot_ram, use_container_width=True)
+            try:
+                pivot_ram = df_hist.pivot_table(index="timestamp", columns="vm_name", values="ram_percent", aggfunc="mean").bfill().ffill()
+                st.line_chart(pivot_ram, use_container_width=True)
+            except Exception as e:
+                st.line_chart(df_hist[["timestamp", "ram_percent"]].set_index("timestamp"), use_container_width=True)
 
         with tab_net:
-            pivot_net = df_hist.pivot_table(index="timestamp", columns="vm_name", values="network_rx_bytes", aggfunc="mean").fillna(method="ffill")
-            st.line_chart(pivot_net, use_container_width=True)
+            try:
+                pivot_net = df_hist.pivot_table(index="timestamp", columns="vm_name", values="network_rx_bytes", aggfunc="mean").bfill().ffill()
+                st.line_chart(pivot_net, use_container_width=True)
+            except Exception as e:
+                st.line_chart(df_hist[["timestamp", "network_rx_bytes"]].set_index("timestamp"), use_container_width=True)
+
+        with tab_comp:
+            st.caption("Latest recorded metrics comparison across virtual machines:")
+            latest_vms = df_hist.sort_values("timestamp").groupby("vm_name").last().reset_index()
+            comp_cols = ["vm_name", "cpu_percent", "ram_percent", "allocated_ram_mb", "vcpu_count"]
+            available_comp_cols = [c for c in comp_cols if c in latest_vms.columns]
+            st.dataframe(latest_vms[available_comp_cols], use_container_width=True, hide_index=True)
     else:
-        st.caption("No historical records recorded yet. As the monitoring engine runs, time-series data will populate here.")
+        st.info("No historical records available in the database yet. As the monitoring daemon polls XCP-ng, time-series data will populate automatically.")
 
     # Auto-refresh loop
     if auto_refresh:

@@ -9,6 +9,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.app import create_app
+from backend.config import Config
 from backend.services.auth_service import hash_password
 
 class TestElearningAPI(unittest.TestCase):
@@ -31,7 +32,7 @@ class TestElearningAPI(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["status"], "healthy")
-        self.assertEqual(data["app_vm"], "10.240.109.51")
+        self.assertEqual(data["app_vm"], Config.APP_VM_IP)
 
     @patch("backend.services.auth_service.query_db")
     def test_login_admin_success(self, mock_query):
@@ -246,7 +247,7 @@ class TestElearningAPI(unittest.TestCase):
         data = res.get_json()["data"]
         self.assertIn("virtualization", data)
         self.assertEqual(data["virtualization"]["hypervisor"], "XCP-ng / Xen")
-        self.assertEqual(data["virtualization"]["host_management_ip"], "10.240.109.196")
+        self.assertEqual(data["virtualization"]["host_management_ip"], Config.XCP_NG_HOST)
 
 if __name__ == "__main__":
     unittest.main()

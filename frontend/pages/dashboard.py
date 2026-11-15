@@ -1,17 +1,25 @@
+import os
 import streamlit as st
 import pandas as pd
 from frontend.api import api_get_dashboard, api_get_health
 from frontend.components.cards import render_metric_card, render_section_title
 
 def render_dashboard_page():
-    render_section_title("📊 System Dashboard", "Real-time metrics retrieved directly from MariaDB (10.240.109.248)")
+    db_ip = os.getenv("DB_VM_IP", "10.189.191.248")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_VM_NAME", "Alpine-DB")
+    app_ip = os.getenv("APP_VM_IP", "10.189.191.51")
+    app_name = os.getenv("APP_VM_NAME", "Alpine-Linux")
+    xcp_host = os.getenv("XCP_NG_HOST", "10.189.191.175")
+
+    render_section_title("📊 System Dashboard", f"Real-time metrics retrieved directly from MariaDB ({db_ip}:{db_port})")
 
     with st.spinner("Fetching latest data from backend API..."):
         resp = api_get_dashboard()
 
     if not resp.get("success"):
         st.error(f"⚠️ Failed to load dashboard: {resp.get('error')}")
-        st.info("Ensure MariaDB VM (10.240.109.248) is running and Flask backend is listening on port 5000.")
+        st.info(f"Ensure MariaDB VM {db_name} ({db_ip}:{db_port}) is running and Flask backend is listening on port 5000.")
         return
 
     data = resp.get("data", {})
@@ -75,10 +83,10 @@ def render_dashboard_page():
     infra_col1, infra_col2, infra_col3 = st.columns(3)
     with infra_col1:
         st.markdown(
-            """
+            f"""
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; padding:12px; border-radius:8px;">
                 <b style="color:#1E40AF;">Hypervisor:</b> XCP-ng / Xen<br>
-                <b>Management IP:</b> <code>10.240.109.196</code><br>
+                <b>Management IP:</b> <code>{xcp_host}</code><br>
                 <b>Interface:</b> XO Lite
             </div>
             """,
@@ -86,10 +94,10 @@ def render_dashboard_page():
         )
     with infra_col2:
         st.markdown(
-            """
+            f"""
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; padding:12px; border-radius:8px;">
-                <b style="color:#1E40AF;">Application VM:</b> Alpine-Linux-New<br>
-                <b>Private IP:</b> <code>10.240.109.51</code><br>
+                <b style="color:#1E40AF;">Application VM:</b> {app_name}<br>
+                <b>Private IP:</b> <code>{app_ip}</code><br>
                 <b>Stack:</b> Python 3.14 + Flask + Streamlit
             </div>
             """,
@@ -97,10 +105,10 @@ def render_dashboard_page():
         )
     with infra_col3:
         st.markdown(
-            """
+            f"""
             <div style="background:#FFFFFF; border:1px solid #E2E8F0; padding:12px; border-radius:8px;">
-                <b style="color:#1E40AF;">Database VM:</b> Alpine-DB<br>
-                <b>Private IP:</b> <code>10.240.109.248:3306</code><br>
+                <b style="color:#1E40AF;">Database VM:</b> {db_name}<br>
+                <b>Private IP:</b> <code>{db_ip}:{db_port}</code><br>
                 <b>Database:</b> MariaDB 11.8.9 (elearning)
             </div>
             """,

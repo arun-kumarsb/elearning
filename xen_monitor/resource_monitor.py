@@ -136,7 +136,7 @@ class XenResourceMonitor:
             # 2. Discover all VMs
             all_vms = self.client.get_all_vms()
 
-            # 3. Target Specific VMs (Alpine-Linux-New and Alpine-DB)
+            # 3. Target Specific VMs (Alpine-Linux and Alpine-DB)
             app_vm_rec = self.client.get_vm_by_name(self.config.app_vm_name)
             db_vm_rec = self.client.get_vm_by_name(self.config.db_vm_name)
 
@@ -145,16 +145,22 @@ class XenResourceMonitor:
 
             # Process Application VM
             if app_vm_rec:
+                actual_app_name = app_vm_rec.get("name", self.config.app_vm_name)
+                logger.info(f"Processing metrics for Application VM: {actual_app_name} (UUID: {app_vm_rec.get('uuid')})")
                 raw_app_metrics = self.client.get_vm_runtime_metrics(app_vm_rec)
                 norm_app = self.normalizer.normalize_vm_metrics(
                     raw_app_metrics, role_label="app_vm", expected_ip=self.config.app_vm_ip, timestamp=now
                 )
                 norm_vms[self.config.app_vm_name] = norm_app
-                # Elasticity recommendation
-                recommendations[self.config.app_vm_name] = self.allocation_engine.evaluate_vm(norm_app)
+                if actual_app_name != self.config.app_vm_name:
+                    norm_vms[actual_app_name] = norm_app
+
+                # Elasticity recommendation (Phase 3 Preparation - read-only)
+                recommendations[actual_app_name] = self.allocation_engine.evaluate_vm(norm_app)
                 # Store historical metric
                 self._persist_metric(norm_app)
             else:
+                logger.warning(f"Application VM named '{self.config.app_vm_name}' not found on XCP-ng host.")
                 norm_vms[self.config.app_vm_name] = {
                     "name": self.config.app_vm_name,
                     "status": "not_discovered",
@@ -163,16 +169,22 @@ class XenResourceMonitor:
 
             # Process Database VM
             if db_vm_rec:
+                actual_db_name = db_vm_rec.get("name", self.config.db_vm_name)
+                logger.info(f"Processing metrics for Database VM: {actual_db_name} (UUID: {db_vm_rec.get('uuid')})")
                 raw_db_metrics = self.client.get_vm_runtime_metrics(db_vm_rec)
                 norm_db = self.normalizer.normalize_vm_metrics(
                     raw_db_metrics, role_label="db_vm", expected_ip=self.config.db_vm_ip, timestamp=now
                 )
                 norm_vms[self.config.db_vm_name] = norm_db
-                # Elasticity recommendation
-                recommendations[self.config.db_vm_name] = self.allocation_engine.evaluate_vm(norm_db)
+                if actual_db_name != self.config.db_vm_name:
+                    norm_vms[actual_db_name] = norm_db
+
+                # Elasticity recommendation (Phase 3 Preparation - read-only)
+                recommendations[actual_db_name] = self.allocation_engine.evaluate_vm(norm_db)
                 # Store historical metric
                 self._persist_metric(norm_db)
             else:
+                logger.warning(f"Database VM named '{self.config.db_vm_name}' not found on XCP-ng host.")
                 norm_vms[self.config.db_vm_name] = {
                     "name": self.config.db_vm_name,
                     "status": "not_discovered",
@@ -251,8 +263,9 @@ class XenResourceMonitor:
                 vm_norm.get("network_rx_bytes", 0),
                 vm_norm.get("network_tx_bytes", 0)
             ))
+            logger.debug(f"Persisted VM metric history for {vm_norm.get('name')}")
         except Exception as e:
-            logger.debug(f"Failed to persist VM metric history: {e}")
+            logger.warning(f"Failed to persist VM metric history for {vm_norm.get('name')}: {e}")
 
     def _persist_host_metric(self, host_norm: Dict[str, Any]):
         """Save host hypervisor metric record."""
@@ -274,8 +287,9 @@ class XenResourceMonitor:
                 0,
                 0
             ))
+            logger.debug("Persisted Host hypervisor metric history")
         except Exception as e:
-            logger.debug(f"Failed to persist Host metric history: {e}")
+            logger.warning(f"Failed to persist Host metric history: {e}")
 
     def _persist_recommendation(self, rec: Dict[str, Any]):
         """Save allocation decision history."""
@@ -296,8 +310,9 @@ class XenResourceMonitor:
                 rec["rationale"],
                 1 if rec["cooldown_active"] else 0
             ))
+            logger.debug(f"Persisted elasticity recommendation for {rec.get('vm_name')}")
         except Exception as e:
-            logger.debug(f"Failed to persist allocation decision: {e}")
+            logger.warning(f"Failed to persist allocation decision: {e}")
 
     # Query methods for Flask API
     def get_latest_metrics(self) -> Dict[str, Any]:
@@ -344,33 +359,43 @@ class XenResourceMonitor:
             }
 
     def get_history(self, vm_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Query persistent metric history from database."""
-        limit = min(200, max(1, int(limit)))
-        if vm_name:
-            sql = """
-                SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
-                       allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
-                FROM vm_metrics_history
-                WHERE LOWER(vm_name) = LOWER(%s)
-                ORDER BY timestamp DESC
-                LIMIT %s
-            """
-            rows = query_db(sql, (vm_name, limit))
-        else:
-            sql = """
-                SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
-                       allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
-                FROM vm_metrics_history
-                ORDER BY timestamp DESC
-                LIMIT %s
-            """
-            rows = query_db(sql, (limit,))
+        """Query persistent metric history from database with robust error handling."""
+        try:
+            safe_limit = min(200, max(1, int(limit)))
+            if vm_name:
+                sql = f"""
+                    SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
+                           allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
+                    FROM vm_metrics_history
+                    WHERE LOWER(vm_name) = LOWER(%s)
+                    ORDER BY timestamp DESC
+                    LIMIT {safe_limit}
+                """
+                rows = query_db(sql, (vm_name,))
+            else:
+                sql = f"""
+                    SELECT id, timestamp, vm_name, vm_uuid, entity_type, cpu_percent, ram_percent,
+                           allocated_ram_mb, used_ram_mb, vcpu_count, network_rx_bytes, network_tx_bytes
+                    FROM vm_metrics_history
+                    ORDER BY timestamp DESC
+                    LIMIT {safe_limit}
+                """
+                rows = query_db(sql)
 
-        # Format datetimes
-        for r in rows:
-            if r.get("timestamp"):
-                r["timestamp"] = str(r["timestamp"])
-        return rows
+            if not rows:
+                return []
+
+            # Format datetimes
+            formatted = []
+            for r in rows:
+                row_dict = dict(r)
+                if row_dict.get("timestamp"):
+                    row_dict["timestamp"] = str(row_dict["timestamp"])
+                formatted.append(row_dict)
+            return formatted
+        except Exception as e:
+            logger.warning(f"Database query error in get_history: {e}")
+            return []
 
 
 if __name__ == "__main__":

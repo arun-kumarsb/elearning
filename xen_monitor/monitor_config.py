@@ -12,18 +12,18 @@ load_dotenv()
 class MonitorConfig:
     def __init__(self):
         # Hypervisor XAPI Credentials & Endpoints
-        self.xcp_host = os.getenv("XCP_NG_HOST", "10.240.109.196")
+        self.xcp_host = os.getenv("XCP_NG_HOST", "10.189.191.175")
         self.xcp_username = os.getenv("XCP_NG_USERNAME", "root")
         self.xcp_password = os.getenv("XCP_NG_PASSWORD", "")
         self.verify_ssl = os.getenv("XCP_NG_VERIFY_SSL", "False").lower() in ("true", "1", "t")
 
         # Dynamic VM Target Discovery Names
-        self.app_vm_name = os.getenv("APP_VM_NAME", "Alpine-Linux-New")
+        self.app_vm_name = os.getenv("APP_VM_NAME", "Alpine-Linux")
         self.db_vm_name = os.getenv("DB_VM_NAME", "Alpine-DB")
 
         # Infrastructure IPs
-        self.app_vm_ip = os.getenv("APP_VM_IP", "10.240.109.51")
-        self.db_vm_ip = os.getenv("DB_VM_IP", "10.240.109.248")
+        self.app_vm_ip = os.getenv("APP_VM_IP", "10.189.191.51")
+        self.db_vm_ip = os.getenv("DB_VM_IP", "10.189.191.248")
 
         # Polling & Scheduling
         self.poll_interval_sec = int(os.getenv("MONITOR_INTERVAL", "5"))

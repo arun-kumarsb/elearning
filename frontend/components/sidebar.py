@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from frontend.api import api_logout
 
@@ -57,13 +58,20 @@ def render_sidebar():
         
         st.markdown("---")
         st.markdown("#### **Xen Infrastructure**")
+        xcp_host = os.getenv("XCP_NG_HOST", "10.189.191.175")
+        app_ip = os.getenv("APP_VM_IP", "10.189.191.51")
+        db_ip = os.getenv("DB_VM_IP", "10.189.191.248")
+        db_port = os.getenv("DB_PORT", "3306")
+        app_name = os.getenv("APP_VM_NAME", "Alpine-Linux")
+        db_name = os.getenv("DB_VM_NAME", "Alpine-DB")
+
         st.markdown(
-            """
+            f"""
             <div style="font-size:0.75rem; color:#475569; line-height:1.5;">
-                • <b>Host:</b> 10.240.109.196 (XCP-ng)<br>
-                • <b>App VM:</b> 10.240.109.51:8501<br>
-                • <b>API:</b> 10.240.109.51:5000<br>
-                • <b>DB VM:</b> 10.240.109.248:3306<br>
+                • <b>Host:</b> {xcp_host} (XCP-ng)<br>
+                • <b>App VM ({app_name}):</b> {app_ip}:8501<br>
+                • <b>API:</b> {app_ip}:5000<br>
+                • <b>DB VM ({db_name}):</b> {db_ip}:{db_port}<br>
                 • <b>Network:</b> Private Bridged
             </div>
             """,

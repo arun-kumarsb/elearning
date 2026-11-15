@@ -14,22 +14,22 @@ class Config:
     FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
     
     # MariaDB VM 1 Configuration (Alpine-DB)
-    # Default private IP: 10.240.109.248
-    DB_HOST = os.getenv("DB_HOST", "10.240.109.248")
+    # Default private IP: 10.189.191.248
+    DB_HOST = os.getenv("DB_HOST", "10.189.191.248")
     DB_PORT = int(os.getenv("DB_PORT", "3306"))
     DB_NAME = os.getenv("DB_NAME", "elearning")
     DB_USER = os.getenv("DB_USER", "elearning")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "elearning123")
     
     # Xen Virtualization & Infrastructure Metadata
-    XCP_NG_HOST = os.getenv("XCP_NG_HOST", "10.240.109.196")
+    XCP_NG_HOST = os.getenv("XCP_NG_HOST", "10.189.191.175")
     XCP_NG_USERNAME = os.getenv("XCP_NG_USERNAME", "root")
     XCP_NG_PASSWORD = os.getenv("XCP_NG_PASSWORD", "")
     XCP_NG_VERIFY_SSL = os.getenv("XCP_NG_VERIFY_SSL", "False").lower() in ("true", "1", "t")
-    APP_VM_NAME = os.getenv("APP_VM_NAME", "Alpine-Linux-New")
+    APP_VM_NAME = os.getenv("APP_VM_NAME", "Alpine-Linux")
     DB_VM_NAME = os.getenv("DB_VM_NAME", "Alpine-DB")
-    APP_VM_IP = os.getenv("APP_VM_IP", "10.240.109.51")
-    DB_VM_IP = os.getenv("DB_VM_IP", "10.240.109.248")
+    APP_VM_IP = os.getenv("APP_VM_IP", "10.189.191.51")
+    DB_VM_IP = os.getenv("DB_VM_IP", "10.189.191.248")
     XEN_ENVIRONMENT = os.getenv("XEN_ENVIRONMENT", "XCP-ng Virtualized Infrastructure")
     
     # Phase 2 Monitoring Engine Configuration

@@ -232,7 +232,7 @@ def test_connection():
             conn.close()
             return {
                 "connected": True,
-                "engine": "SQLite Engine (Local Dev Mode - MariaDB 10.240.109.248 Unreachable)",
+                "engine": f"SQLite Engine (Local Dev Mode - MariaDB {Config.DB_HOST} Unreachable)",
                 "host": "localhost",
                 "database": "elearning_local.db",
                 "version": sqlite3.sqlite_version,
@@ -247,21 +247,33 @@ def test_connection():
         }
 
 def ensure_schema():
-    """Ensure schema tables are initialized."""
+    """Ensure schema tables are initialized idempotently."""
     try:
         if is_mariadb_reachable():
             res = test_connection()
             tables = res.get("tables", [])
-            if "users" not in tables or "enrollments" not in tables:
+            required_tables = ["users", "enrollments", "vm_metrics_history", "allocation_decisions_history"]
+            missing_tables = [t for t in required_tables if t not in tables]
+            
+            if missing_tables:
+                logger.info(f"Applying schema migrations for missing tables: {missing_tables}")
                 migration_path = os.path.join(os.path.dirname(__file__), "..", "database", "migrations.sql")
                 if os.path.exists(migration_path):
                     with open(migration_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    statements = [stmt.strip() for stmt in content.split(";") if stmt.strip()]
+                    
+                    statements = []
+                    for raw_stmt in content.split(";"):
+                        lines = [
+                            line for line in raw_stmt.splitlines()
+                            if not line.strip().startswith("--") and not line.strip().startswith("/*")
+                        ]
+                        cleaned = "\n".join(lines).strip()
+                        if cleaned and not cleaned.upper().startswith("USE "):
+                            statements.append(cleaned)
+                    
                     with get_db_cursor() as cursor:
                         for stmt in statements:
-                            if stmt.upper().startswith("USE ") or stmt.startswith("--"):
-                                continue
                             try:
                                 cursor.execute(stmt)
                             except Exception as ex:
