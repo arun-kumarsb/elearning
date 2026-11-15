@@ -34,6 +34,14 @@ from backend.services.xen_service import (
 
 xen_bp = Blueprint("xen", __name__, url_prefix="/api/xen")
 
+ADMIN_ROLE_VARIANTS = {"admin", "administrator", "adm", "root"}
+
+def is_admin_role(role: Any) -> bool:
+    """Safely check if role matches any administrator variation (admin, administrator, ADMIN, etc.)."""
+    if not role or not isinstance(role, str):
+        return False
+    return role.strip().lower() in ADMIN_ROLE_VARIANTS
+
 def admin_required(f):
     """Enforce administrator role authentication for critical actuation operations."""
     @wraps(f)
@@ -45,7 +53,7 @@ def admin_required(f):
         payload = verify_session_token(token)
         if not payload:
             return jsonify({"success": False, "error": "Invalid or expired session token"}), 401
-        if payload.get("role") != "admin":
+        if not is_admin_role(payload.get("role")):
             return jsonify({"success": False, "error": "Administrator privilege required"}), 403
         request.user = payload
         return f(*args, **kwargs)

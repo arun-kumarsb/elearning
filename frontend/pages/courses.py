@@ -8,11 +8,13 @@ from frontend.api import (
     api_enroll_student,
     api_get_student_enrollments
 )
+from frontend.auth_utils import is_admin_user, sync_session_state
 from frontend.components.cards import render_section_title
 
 def render_courses_page():
+    sync_session_state()
     user = st.session_state.get("user", {})
-    is_admin = user.get("role") == "admin"
+    is_admin = is_admin_user()
     student_id = user.get("student_id")
 
     if is_admin:

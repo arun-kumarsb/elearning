@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
 
+from frontend.auth_utils import is_admin_user, sync_session_state
 from frontend.api import (
     api_get_xen_metrics,
     api_get_allocation_status,
@@ -35,15 +36,18 @@ EXPECTED_DB_VM_UUID = "0a6dec09-0466-0079-4b66-80704b59587d"
 
 def render_intelligent_orchestration_page():
     """Render the primary Intelligent Resource Orchestration interface."""
-    st.set_page_config(
-        page_title="Intelligent Resource Orchestration | Xen Platform",
-        page_icon="🚀",
-        layout="wide"
-    )
+    sync_session_state()
+    try:
+        st.set_page_config(
+            page_title="Intelligent Resource Orchestration | Xen Platform",
+            page_icon="🚀",
+            layout="wide"
+        )
+    except Exception:
+        pass
 
     # 1. Authorization Gate (Admin Only)
-    role = st.session_state.get("role")
-    if role != "admin":
+    if not is_admin_user():
         st.error("⛔ Access Denied. Resource orchestration operations are restricted to administrators only.")
         st.info("Please log in with an administrator account (e.g., admin@elearning.local).")
         return

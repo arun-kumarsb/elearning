@@ -1,13 +1,14 @@
 import streamlit as st
 import pandas as pd
 from frontend.api import api_get_students, api_create_student, api_get_student, api_delete_student
+from frontend.auth_utils import is_admin_user, sync_session_state
 from frontend.components.cards import render_section_title
 
 def render_students_page():
+    sync_session_state()
     render_section_title("👥 Student Management", "Manage student profiles and view enrolled coursework")
 
-    user = st.session_state.get("user", {})
-    is_admin = user.get("role") == "admin"
+    is_admin = is_admin_user()
 
     if not is_admin:
         st.warning("⚠️ Access restricted. Administrator privileges required to manage students.")

@@ -9,6 +9,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from frontend.api import api_login
+from frontend.auth_utils import sync_session_state, is_admin_user
 from frontend.components.sidebar import render_sidebar
 from frontend.components.cards import render_system_header
 from frontend.pages.dashboard import render_dashboard_page
@@ -38,6 +39,21 @@ if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 if "user" not in st.session_state:
     st.session_state["user"] = None
+if "role" not in st.session_state:
+    st.session_state["role"] = None
+if "email" not in st.session_state:
+    st.session_state["email"] = None
+
+def _store_authenticated_user(user_info: dict):
+    """Store user session data safely across all expected session state keys."""
+    if not isinstance(user_info, dict):
+        return
+    st.session_state["authenticated"] = True
+    st.session_state["user"] = user_info
+    st.session_state["role"] = user_info.get("role")
+    st.session_state["email"] = user_info.get("email")
+    st.session_state["name"] = user_info.get("name")
+    sync_session_state()
 
 def render_login_view():
     """Render a clean, professional login view with quick test shortcuts."""
@@ -69,8 +85,7 @@ def render_login_view():
                     with st.spinner("Authenticating with MariaDB..."):
                         resp = api_login(email, password)
                     if resp.get("success"):
-                        st.session_state["authenticated"] = True
-                        st.session_state["user"] = resp.get("user")
+                        _store_authenticated_user(resp.get("user"))
                         st.success("Login successful!")
                         st.rerun()
                     else:
@@ -86,8 +101,7 @@ def render_login_view():
                 with st.spinner("Authenticating default Admin..."):
                     resp = api_login("admin@elearning.local", "Admin@123")
                 if resp.get("success"):
-                    st.session_state["authenticated"] = True
-                    st.session_state["user"] = resp.get("user")
+                    _store_authenticated_user(resp.get("user"))
                     st.rerun()
                 else:
                     st.error(f"Admin login failed: {resp.get('error')}")
@@ -97,13 +111,13 @@ def render_login_view():
                 with st.spinner("Authenticating Student One..."):
                     resp = api_login("student@example.com", "Student@123")
                 if resp.get("success"):
-                    st.session_state["authenticated"] = True
-                    st.session_state["user"] = resp.get("user")
+                    _store_authenticated_user(resp.get("user"))
                     st.rerun()
                 else:
                     st.error(f"Student login failed: {resp.get('error')}")
 
 def main():
+    sync_session_state()
     if not st.session_state.get("authenticated"):
         render_login_view()
         return

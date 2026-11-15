@@ -1,13 +1,14 @@
 import os
 import streamlit as st
 from frontend.api import api_get_health, api_get_dashboard
+from frontend.auth_utils import is_admin_user, sync_session_state
 from frontend.components.cards import render_section_title, render_metric_card
 
 def render_admin_page():
+    sync_session_state()
     render_section_title("🛡️ Administrator Hub", "System administration, database diagnostics, and quick management links")
 
-    user = st.session_state.get("user", {})
-    if user.get("role") != "admin":
+    if not is_admin_user():
         st.warning("⚠️ Access restricted to Administrators.")
         return
 

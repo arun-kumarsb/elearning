@@ -514,5 +514,107 @@ class TestStudentLoadOrchestration(unittest.TestCase):
         resp_invalid = client.post("/api/xen/allocation/mode", headers=headers, json={"mode": "turbo"})
         self.assertEqual(resp_invalid.status_code, 400)
 
+    # -------------------------------------------------------------------------
+    # Scenario 23: Authorization Role Normalization
+    # -------------------------------------------------------------------------
+    def test_23_authorization_role_normalization(self):
+        """Verify role normalization handles 'admin', 'administrator', 'Administrator', 'ADMIN'."""
+        from frontend.auth_utils import is_admin_role, normalize_role
+        from backend.routes.xen_routes import is_admin_role as backend_is_admin_role
+
+        admin_variants = ["admin", "administrator", "Administrator", "ADMIN", " Admin ", "ADMINISTRATOR"]
+        for v in admin_variants:
+            self.assertTrue(is_admin_role(v), f"Failed for variant: {v}")
+            self.assertTrue(backend_is_admin_role(v), f"Backend failed for variant: {v}")
+
+        non_admin_variants = ["student", "Student", "STUDENT", "user", "", None, 123, "guest", "evaluator"]
+        for v in non_admin_variants:
+            self.assertFalse(is_admin_role(v), f"Should be False for non-admin: {v}")
+            self.assertFalse(backend_is_admin_role(v), f"Backend should be False for non-admin: {v}")
+
+    # -------------------------------------------------------------------------
+    # Scenario 24: Session State Synchronization
+    # -------------------------------------------------------------------------
+    def test_24_session_state_synchronization(self):
+        """Verify session state sync retains authenticated user information and role across reruns."""
+        import streamlit as st
+        from frontend.auth_utils import is_admin_user, sync_session_state, get_current_user, get_current_role
+
+        # 1. Admin login simulation
+        st.session_state.clear()
+        st.session_state["authenticated"] = True
+        st.session_state["user"] = {
+            "id": 1,
+            "email": "admin@elearning.local",
+            "name": "Admin User",
+            "role": "Administrator",
+            "token": "valid.token"
+        }
+        sync_session_state()
+
+        self.assertEqual(st.session_state.get("role"), "Administrator")
+        self.assertEqual(st.session_state.get("email"), "admin@elearning.local")
+        self.assertTrue(is_admin_user())
+        self.assertEqual(get_current_role(), "administrator")
+
+        # 2. Student login simulation
+        st.session_state.clear()
+        st.session_state["authenticated"] = True
+        st.session_state["user"] = {
+            "id": 2,
+            "email": "student@example.com",
+            "name": "Student One",
+            "role": "student",
+            "token": "valid.token"
+        }
+        sync_session_state()
+
+        self.assertEqual(st.session_state.get("role"), "student")
+        self.assertFalse(is_admin_user())
+        self.assertEqual(get_current_role(), "student")
+
+        # 3. Unauthenticated simulation
+        st.session_state.clear()
+        st.session_state["authenticated"] = False
+        st.session_state["user"] = None
+        self.assertFalse(is_admin_user())
+
+    # -------------------------------------------------------------------------
+    # Scenario 25: API Endpoints Authorization Enforcement
+    # -------------------------------------------------------------------------
+    def test_25_api_endpoints_authorization_enforcement(self):
+        """Verify privileged Xen and workload endpoints reject unauthenticated and student users."""
+        app = create_app()
+        client = app.test_client()
+
+        student_token = generate_session_token(2, "student@example.com", "student")
+        student_headers = {"Authorization": f"Bearer {student_token}", "Content-Type": "application/json"}
+        admin_alt_token = generate_session_token(1, "admin@elearning.local", "Administrator")
+        admin_headers = {"Authorization": f"Bearer {admin_alt_token}", "Content-Type": "application/json"}
+
+        # 1. Unauthenticated request to /api/xen/allocation/cpu -> 401
+        r_unauth = client.post("/api/xen/allocation/cpu", json={"vm_name": "Alpine-Linux", "vcpus": 2})
+        self.assertEqual(r_unauth.status_code, 401)
+
+        # 2. Student request to /api/xen/allocation/cpu -> 403 Forbidden
+        r_student = client.post("/api/xen/allocation/cpu", headers=student_headers, json={"vm_name": "Alpine-Linux", "vcpus": 2})
+        self.assertEqual(r_student.status_code, 403)
+
+        # 3. Student request to /api/xen/allocation/ram -> 403 Forbidden
+        r_student_ram = client.post("/api/xen/allocation/ram", headers=student_headers, json={"vm_name": "Alpine-Linux", "ram_mb": 2048})
+        self.assertEqual(r_student_ram.status_code, 403)
+
+        # 4. Student request to /api/xen/student-load/start -> 403 Forbidden
+        r_student_load = client.post("/api/xen/student-load/start", headers=student_headers, json={"simulated_students": 10})
+        self.assertEqual(r_student_load.status_code, 403)
+
+        # 5. Student request to /api/xen/workload/cpu/start -> 403 Forbidden
+        r_student_workload = client.post("/api/xen/workload/cpu/start", headers=student_headers, json={"target_vm": "Alpine-Linux"})
+        self.assertEqual(r_student_workload.status_code, 403)
+
+        # 6. Admin with normalized variant ('Administrator') authorized
+        r_admin_mode = client.post("/api/xen/allocation/mode", headers=admin_headers, json={"mode": "manual"})
+        self.assertEqual(r_admin_mode.status_code, 200)
+
 if __name__ == "__main__":
     unittest.main()

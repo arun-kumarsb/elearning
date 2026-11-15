@@ -1,20 +1,22 @@
 import os
 import streamlit as st
 from frontend.api import api_logout
+from frontend.auth_utils import is_admin_user, sync_session_state, get_current_user
 
 def render_sidebar():
     """Render the sidebar with role-aware navigation and session details."""
+    sync_session_state()
     with st.sidebar:
         st.markdown("### 🎓 **Xen E-Learning**")
         st.caption("Virtualized on XCP-ng / Xen")
         
-        user = st.session_state.get("user")
+        user = get_current_user()
         if not user:
             st.info("Please log in to continue.")
             return None
             
-        role = user.get("role", "student")
-        role_badge = "🛡️ Administrator" if role == "admin" else "🎓 Student"
+        role_is_admin = is_admin_user()
+        role_badge = "🛡️ Administrator" if role_is_admin else "🎓 Student"
         
         # User details card
         st.markdown(
@@ -32,7 +34,7 @@ def render_sidebar():
         
         st.markdown("#### **Navigation**")
         
-        if role == "admin":
+        if role_is_admin:
             nav_options = [
                 "📊 Dashboard",
                 "🚀 Intelligent Resource Orchestration",
