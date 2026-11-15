@@ -1,8 +1,9 @@
 """
 Dynamic Allocation Engine (Phase 3 Intelligent Resource Controller)
 Evaluates real-time VM telemetry against elasticity thresholds and generates
-actionable scaling decisions with independent cooldown tracking, consecutive breach
-confirmation (hysteresis), host capacity safety checks, and emergency stop controls.
+actionable scaling decisions with independent per-VM resource policies,
+per-resource cooldown tracking, consecutive breach confirmation (hysteresis),
+host capacity safety checks, and emergency stop controls.
 """
 
 import time
@@ -58,7 +59,7 @@ class AllocationEngine:
         """
         Evaluate a single VM's CPU and RAM telemetry against configured thresholds.
         Enforces:
-          - Minimum and maximum boundaries
+          - VM-specific resource policy and boundaries
           - Independent per-resource cooldown
           - Hysteresis via consecutive breach counts
           - Hypervisor physical memory headroom
@@ -72,6 +73,19 @@ class AllocationEngine:
         ram_pct = float(vm_metrics.get("ram_percent", 0.0))
 
         now = time.time()
+
+        # Retrieve per-VM independent policy
+        policy = self.config.get_vm_policy(vm_name)
+        min_vcpus = policy.get("min_vcpus", self.config.min_vcpus)
+        max_vcpus = policy.get("max_vcpus", self.config.max_vcpus)
+        min_ram_mb = policy.get("min_ram_mb", self.config.min_ram_mb)
+        max_ram_mb = policy.get("max_ram_mb", self.config.max_ram_mb)
+        cpu_scale_up_thresh = policy.get("cpu_scale_up_threshold", self.config.cpu_scale_up_threshold)
+        cpu_scale_down_thresh = policy.get("cpu_scale_down_threshold", self.config.cpu_scale_down_threshold)
+        ram_scale_up_thresh = policy.get("ram_scale_up_threshold", self.config.ram_scale_up_threshold)
+        ram_scale_down_thresh = policy.get("ram_scale_down_threshold", self.config.ram_scale_down_threshold)
+        ram_inc = policy.get("ram_increment_mb", self.config.ram_increment_mb)
+        preserve_initial = policy.get("preserve_initial", False)
 
         # Cooldown check per resource
         cpu_cd = self.get_cooldown_status(clean_name, "cpu")
@@ -93,7 +107,25 @@ class AllocationEngine:
                 cpu_action, ram_action,
                 current_vcpus, recommended_vcpus,
                 allocated_ram, recommended_ram_mb,
-                reasons, cpu_cd, ram_cd
+                reasons, cpu_cd, ram_cd,
+                policy=policy
+            )
+            self._save_decision(decision)
+            return decision
+
+        # Check if VM policy specifies preserving initial allocation (e.g. Alpine-DB baseline)
+        if preserve_initial:
+            reasons.append(
+                f"Preserving initial {vm_name} resource baseline as configured by policy "
+                f"(Limits: {min_vcpus}-{max_vcpus} vCPUs, {min_ram_mb}-{max_ram_mb} MB RAM)."
+            )
+            decision = self._format_decision(
+                now, vm_name, vm_metrics.get("uuid"),
+                "HOLD", "HOLD",
+                current_vcpus, current_vcpus,
+                allocated_ram, allocated_ram,
+                reasons, cpu_cd, ram_cd,
+                policy=policy
             )
             self._save_decision(decision)
             return decision
@@ -104,21 +136,21 @@ class AllocationEngine:
         cpu_up_key = f"{clean_name}:cpu:scale_up"
         cpu_down_key = f"{clean_name}:cpu:scale_down"
 
-        if cpu_pct > self.config.cpu_scale_up_threshold:
+        if cpu_pct > cpu_scale_up_thresh:
             self._consecutive_breaches[cpu_up_key] = self._consecutive_breaches.get(cpu_up_key, 0) + 1
             self._consecutive_breaches[cpu_down_key] = 0
             breach_count = self._consecutive_breaches[cpu_up_key]
 
-            if current_vcpus >= self.config.max_vcpus:
+            if current_vcpus >= max_vcpus:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"High CPU workload ({cpu_pct}% > {self.config.cpu_scale_up_threshold}%), "
-                    f"but VM is already at maximum boundary ({self.config.max_vcpus} vCPUs)."
+                    f"High CPU workload ({cpu_pct}% > {cpu_scale_up_thresh}%), "
+                    f"but VM is already at maximum boundary ({max_vcpus} vCPUs)."
                 )
             elif cpu_cd["cooldown_active"]:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"High CPU workload ({cpu_pct}% > {self.config.cpu_scale_up_threshold}%), "
+                    f"High CPU workload ({cpu_pct}% > {cpu_scale_up_thresh}%), "
                     f"but CPU cooldown is active ({cpu_cd['remaining_sec']}s remaining)."
                 )
             elif breach_count < self.config.consecutive_breach_threshold:
@@ -129,27 +161,27 @@ class AllocationEngine:
                 )
             else:
                 cpu_action = "SCALE_UP"
-                recommended_vcpus = min(self.config.max_vcpus, current_vcpus + 1)
+                recommended_vcpus = min(max_vcpus, current_vcpus + 1)
                 reasons.append(
-                    f"Sustained high CPU workload ({cpu_pct}% > {self.config.cpu_scale_up_threshold}% over {breach_count} intervals). "
+                    f"Sustained high CPU workload ({cpu_pct}% > {cpu_scale_up_thresh}% over {breach_count} intervals). "
                     f"Scale vCPUs from {current_vcpus} to {recommended_vcpus}."
                 )
 
-        elif cpu_pct < self.config.cpu_scale_down_threshold:
+        elif cpu_pct < cpu_scale_down_thresh:
             self._consecutive_breaches[cpu_down_key] = self._consecutive_breaches.get(cpu_down_key, 0) + 1
             self._consecutive_breaches[cpu_up_key] = 0
             breach_count = self._consecutive_breaches[cpu_down_key]
 
-            if current_vcpus <= self.config.min_vcpus:
+            if current_vcpus <= min_vcpus:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"Low CPU workload ({cpu_pct}% < {self.config.cpu_scale_down_threshold}%), "
-                    f"but VM is already at minimum boundary ({self.config.min_vcpus} vCPU)."
+                    f"Low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}%), "
+                    f"but VM is already at minimum boundary ({min_vcpus} vCPU)."
                 )
             elif cpu_cd["cooldown_active"]:
                 cpu_action = "HOLD"
                 reasons.append(
-                    f"Low CPU workload ({cpu_pct}% < {self.config.cpu_scale_down_threshold}%), "
+                    f"Low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}%), "
                     f"but CPU cooldown is active ({cpu_cd['remaining_sec']}s remaining)."
                 )
             elif breach_count < self.config.consecutive_breach_threshold:
@@ -160,9 +192,9 @@ class AllocationEngine:
                 )
             else:
                 cpu_action = "SCALE_DOWN"
-                recommended_vcpus = max(self.config.min_vcpus, current_vcpus - 1)
+                recommended_vcpus = max(min_vcpus, current_vcpus - 1)
                 reasons.append(
-                    f"Sustained low CPU workload ({cpu_pct}% < {self.config.cpu_scale_down_threshold}% over {breach_count} intervals). "
+                    f"Sustained low CPU workload ({cpu_pct}% < {cpu_scale_down_thresh}% over {breach_count} intervals). "
                     f"Scale down vCPUs from {current_vcpus} to {recommended_vcpus} to optimize hypervisor cores."
                 )
         else:
@@ -176,21 +208,21 @@ class AllocationEngine:
         ram_up_key = f"{clean_name}:ram:scale_up"
         ram_down_key = f"{clean_name}:ram:scale_down"
 
-        if ram_pct > self.config.ram_scale_up_threshold:
+        if ram_pct > ram_scale_up_thresh:
             self._consecutive_breaches[ram_up_key] = self._consecutive_breaches.get(ram_up_key, 0) + 1
             self._consecutive_breaches[ram_down_key] = 0
             breach_count = self._consecutive_breaches[ram_up_key]
 
-            if allocated_ram >= self.config.max_ram_mb:
+            if allocated_ram >= max_ram_mb:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"High RAM pressure ({ram_pct}% > {self.config.ram_scale_up_threshold}%), "
-                    f"but VM is already at maximum boundary ({self.config.max_ram_mb} MB)."
+                    f"High RAM pressure ({ram_pct}% > {ram_scale_up_thresh}%), "
+                    f"but VM is already at maximum boundary ({max_ram_mb} MB)."
                 )
             elif ram_cd["cooldown_active"]:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"High RAM pressure ({ram_pct}% > {self.config.ram_scale_up_threshold}%), "
+                    f"High RAM pressure ({ram_pct}% > {ram_scale_up_thresh}%), "
                     f"but RAM cooldown is active ({ram_cd['remaining_sec']}s remaining)."
                 )
             elif breach_count < self.config.consecutive_breach_threshold:
@@ -201,7 +233,7 @@ class AllocationEngine:
                 )
             else:
                 # Check hypervisor physical RAM capacity
-                target_ram = min(self.config.max_ram_mb, allocated_ram + self.config.ram_increment_mb)
+                target_ram = min(max_ram_mb, allocated_ram + ram_inc)
                 needed_mb = (target_ram - allocated_ram) + 256.0  # 256MB safety cushion
                 host_avail = host_metrics.get("available_ram_mb") if host_metrics else None
 
@@ -214,25 +246,25 @@ class AllocationEngine:
                     ram_action = "SCALE_UP"
                     recommended_ram_mb = target_ram
                     reasons.append(
-                        f"Sustained elevated memory pressure ({ram_pct}% > {self.config.ram_scale_up_threshold}% over {breach_count} intervals). "
+                        f"Sustained elevated memory pressure ({ram_pct}% > {ram_scale_up_thresh}% over {breach_count} intervals). "
                         f"Expand dynamic memory ceiling from {allocated_ram} MB to {recommended_ram_mb} MB."
                     )
 
-        elif ram_pct < self.config.ram_scale_down_threshold:
+        elif ram_pct < ram_scale_down_thresh:
             self._consecutive_breaches[ram_down_key] = self._consecutive_breaches.get(ram_down_key, 0) + 1
             self._consecutive_breaches[ram_up_key] = 0
             breach_count = self._consecutive_breaches[ram_down_key]
 
-            if allocated_ram <= self.config.min_ram_mb:
+            if allocated_ram <= min_ram_mb:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"Low RAM workload ({ram_pct}% < {self.config.ram_scale_down_threshold}%), "
-                    f"but VM is already at minimum boundary ({self.config.min_ram_mb} MB)."
+                    f"Low RAM workload ({ram_pct}% < {ram_scale_down_thresh}%), "
+                    f"but VM is already at minimum boundary ({min_ram_mb} MB)."
                 )
             elif ram_cd["cooldown_active"]:
                 ram_action = "HOLD"
                 reasons.append(
-                    f"Low RAM workload ({ram_pct}% < {self.config.ram_scale_down_threshold}%), "
+                    f"Low RAM workload ({ram_pct}% < {ram_scale_down_thresh}%), "
                     f"but RAM cooldown is active ({ram_cd['remaining_sec']}s remaining)."
                 )
             elif breach_count < self.config.consecutive_breach_threshold:
@@ -243,9 +275,9 @@ class AllocationEngine:
                 )
             else:
                 ram_action = "SCALE_DOWN"
-                recommended_ram_mb = max(self.config.min_ram_mb, allocated_ram - self.config.ram_increment_mb)
+                recommended_ram_mb = max(min_ram_mb, allocated_ram - ram_inc)
                 reasons.append(
-                    f"Sustained low memory workload ({ram_pct}% < {self.config.ram_scale_down_threshold}% over {breach_count} intervals). "
+                    f"Sustained low memory workload ({ram_pct}% < {ram_scale_down_thresh}% over {breach_count} intervals). "
                     f"Reclaim hypervisor dynamic memory from {allocated_ram} MB to {recommended_ram_mb} MB."
                 )
         else:
@@ -261,7 +293,8 @@ class AllocationEngine:
             cpu_action, ram_action,
             current_vcpus, recommended_vcpus,
             allocated_ram, recommended_ram_mb,
-            reasons, cpu_cd, ram_cd
+            reasons, cpu_cd, ram_cd,
+            policy=policy
         )
         self._save_decision(decision)
         return decision
@@ -272,12 +305,18 @@ class AllocationEngine:
         current_vcpus: int, recommended_vcpus: int,
         current_ram_mb: float, recommended_ram_mb: float,
         reasons: List[str],
-        cpu_cd: Dict[str, Any], ram_cd: Dict[str, Any]
+        cpu_cd: Dict[str, Any], ram_cd: Dict[str, Any],
+        policy: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Construct structured decision record."""
         rationale = " | ".join(reasons)
         is_cooldown_active = cpu_cd.get("cooldown_active", False) or ram_cd.get("cooldown_active", False)
         max_cd_remaining = max(cpu_cd.get("remaining_sec", 0), ram_cd.get("remaining_sec", 0))
+
+        min_v = policy.get("min_vcpus", self.config.min_vcpus) if policy else self.config.min_vcpus
+        max_v = policy.get("max_vcpus", self.config.max_vcpus) if policy else self.config.max_vcpus
+        min_r = policy.get("min_ram_mb", self.config.min_ram_mb) if policy else self.config.min_ram_mb
+        max_r = policy.get("max_ram_mb", self.config.max_ram_mb) if policy else self.config.max_ram_mb
 
         return {
             "timestamp": now,
@@ -297,10 +336,10 @@ class AllocationEngine:
             "ram_cooldown": ram_cd,
             "emergency_stop": self.emergency_stop,
             "boundaries": {
-                "min_vcpus": self.config.min_vcpus,
-                "max_vcpus": self.config.max_vcpus,
-                "min_ram_mb": self.config.min_ram_mb,
-                "max_ram_mb": self.config.max_ram_mb
+                "min_vcpus": min_v,
+                "max_vcpus": max_v,
+                "min_ram_mb": min_r,
+                "max_ram_mb": max_r
             }
         }
 

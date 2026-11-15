@@ -47,7 +47,22 @@ class Config:
     RAM_SCALE_DOWN_THRESHOLD = float(os.getenv("RAM_SCALE_DOWN_THRESHOLD", "30.0"))
     RAM_INCREMENT_MB = float(os.getenv("RAM_INCREMENT_MB", "512.0"))
     RAM_MIN_MB = float(os.getenv("RAM_MIN_MB", "1024.0"))
-    RAM_MAX_MB = float(os.getenv("RAM_MAX_MB", "4096.0"))
+    RAM_MAX_MB = float(os.getenv("RAM_MAX_MB", "6144.0"))
+
+    # Application VM Specific Policy (Alpine-Linux)
+    APP_VM_INITIAL_RAM_MB = float(os.getenv("APP_VM_INITIAL_RAM_MB", "4096.0"))
+    APP_VM_MIN_RAM_MB = float(os.getenv("APP_VM_MIN_RAM_MB", "2048.0"))
+    APP_VM_MAX_RAM_MB = float(os.getenv("APP_VM_MAX_RAM_MB", "6144.0"))
+    APP_VM_INITIAL_VCPUS = int(os.getenv("APP_VM_INITIAL_VCPUS", "2"))
+    APP_VM_MIN_VCPUS = int(os.getenv("APP_VM_MIN_VCPUS", "1"))
+    APP_VM_MAX_VCPUS = int(os.getenv("APP_VM_MAX_VCPUS", "4"))
+
+    # Database VM Specific Policy (Alpine-DB - Independently Configurable)
+    DB_VM_MIN_RAM_MB = float(os.getenv("DB_VM_MIN_RAM_MB", "1024.0"))
+    DB_VM_MAX_RAM_MB = float(os.getenv("DB_VM_MAX_RAM_MB", "4096.0"))
+    DB_VM_MIN_VCPUS = int(os.getenv("DB_VM_MIN_VCPUS", "1"))
+    DB_VM_MAX_VCPUS = int(os.getenv("DB_VM_MAX_VCPUS", "4"))
+    DB_VM_PRESERVE_INITIAL = os.getenv("DB_VM_PRESERVE_INITIAL", "True").lower() in ("true", "1", "t")
     
     # Cooldown & Hysteresis Controls
     COOLDOWN_PERIOD = int(os.getenv("COOLDOWN_PERIOD", os.getenv("SCALE_COOLDOWN_SEC", "60")))

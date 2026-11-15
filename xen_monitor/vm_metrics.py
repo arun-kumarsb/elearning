@@ -79,5 +79,13 @@ class MetricsNormalizer:
             "network_rx_kbs": net_stats["network_rx_kbs"],
             "network_tx_kbs": net_stats["network_tx_kbs"],
             "network_rate_human": net_stats["network_rate_human"],
+            "configured_dynamic_min_mb": raw_vm.get("configured_dynamic_min_mb", 0.0),
+            "configured_dynamic_max_mb": raw_vm.get("configured_dynamic_max_mb", 0.0),
+            "configured_static_min_mb": raw_vm.get("configured_static_min_mb", 0.0),
+            "configured_static_max_mb": raw_vm.get("configured_static_max_mb", 0.0),
+            "actual_allocated_ram_mb": allocated_ram,
+            "actual_guest_used_ram_mb": used_ram,
+            "supports_ballooning": raw_vm.get("supports_ballooning", False),
+            "supports_vcpu_hotplug": raw_vm.get("supports_vcpu_hotplug", False),
             "status": "online" if raw_vm.get("power_state") == "Running" else "offline"
         }

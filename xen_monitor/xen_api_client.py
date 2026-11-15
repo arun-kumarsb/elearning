@@ -211,6 +211,7 @@ class XenAPIClient:
                 continue
 
             vcpus = int(rec.get("VCPUs_max") or rec.get("VCPUs_at_startup") or 1)
+            static_min_mb = round(int(rec.get("memory_static_min", 0)) / (1024 * 1024), 1)
             static_max_mb = round(int(rec.get("memory_static_max", 0)) / (1024 * 1024), 1)
             dynamic_max_mb = round(int(rec.get("memory_dynamic_max", 0)) / (1024 * 1024), 1)
             dynamic_min_mb = round(int(rec.get("memory_dynamic_min", 0)) / (1024 * 1024), 1)
@@ -222,12 +223,15 @@ class XenAPIClient:
                 "name": rec.get("name_label"),
                 "power_state": rec.get("power_state"),
                 "vcpus": vcpus,
+                "memory_static_min_mb": static_min_mb,
                 "memory_static_max_mb": static_max_mb,
                 "memory_dynamic_max_mb": dynamic_max_mb,
                 "memory_dynamic_min_mb": dynamic_min_mb,
                 "memory_target_mb": target_mb,
                 "metrics_ref": rec.get("metrics"),
                 "guest_metrics_ref": rec.get("guest_metrics"),
+                "supports_ballooning": bool(rec.get("guest_metrics") and rec.get("guest_metrics") != "OpaqueRef:NULL"),
+                "supports_vcpu_hotplug": bool(rec.get("power_state") == "Running" and int(rec.get("VCPUs_max", 1)) > 1),
                 "vifs": rec.get("VIFs", [])
             })
 
@@ -377,7 +381,15 @@ class XenAPIClient:
             "allocated_ram_mb": allocated_ram_mb,
             "used_ram_mb": used_ram_mb,
             "network_rx_bytes": net_rx_bytes,
-            "network_tx_bytes": net_tx_bytes
+            "network_tx_bytes": net_tx_bytes,
+            "configured_dynamic_min_mb": vm_info.get("memory_dynamic_min_mb", 0.0),
+            "configured_dynamic_max_mb": vm_info.get("memory_dynamic_max_mb", 0.0),
+            "configured_static_min_mb": vm_info.get("memory_static_min_mb", 0.0),
+            "configured_static_max_mb": vm_info.get("memory_static_max_mb", 0.0),
+            "actual_allocated_ram_mb": allocated_ram_mb,
+            "actual_guest_used_ram_mb": used_ram_mb,
+            "supports_ballooning": vm_info.get("supports_ballooning", False),
+            "supports_vcpu_hotplug": vm_info.get("supports_vcpu_hotplug", False)
         }
 
     def get_vm_by_uuid(self, uuid: str) -> Optional[Dict[str, Any]]:
@@ -422,15 +434,6 @@ class XenAPIClient:
                 "vm_identifier": vm_identifier
             }
 
-        # Boundary checks
-        if target_vcpus < self.config.min_vcpus or target_vcpus > self.config.max_vcpus:
-            return {
-                "success": False,
-                "error": f"Target vCPUs {target_vcpus} violates configured limits [{self.config.min_vcpus}, {self.config.max_vcpus}].",
-                "vm_identifier": vm_identifier,
-                "requested_value": target_vcpus
-            }
-
         vm = self.find_vm(vm_identifier)
         if not vm:
             return {
@@ -443,6 +446,20 @@ class XenAPIClient:
         vm_name = vm["name"]
         vm_uuid = vm["uuid"]
         power_state = vm.get("power_state")
+
+        # Boundary checks against VM policy
+        policy = self.config.get_vm_policy(vm_name)
+        min_vcpus = policy.get("min_vcpus", self.config.min_vcpus)
+        max_vcpus = policy.get("max_vcpus", self.config.max_vcpus)
+
+        if target_vcpus < min_vcpus or target_vcpus > max_vcpus:
+            return {
+                "success": False,
+                "error": f"Target vCPUs {target_vcpus} violates configured limits [{min_vcpus}, {max_vcpus}] for VM '{vm_name}'.",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "requested_value": target_vcpus
+            }
 
         # Check power state
         if power_state not in ("Running", "Halted"):
@@ -497,14 +514,32 @@ class XenAPIClient:
             if startup_res.get("Status") != "Success":
                 logger.warning(f"Failed to update VCPUs_at_startup for {vm_name}: {startup_res.get('ErrorDescription')}")
 
-            # Verify actual allocation
+            # Verify actual allocation by re-reading VM configuration
             verify_res = self.proxy.VM.get_record(self.session_id, vm_ref)
-            actual_vcpus = target_vcpus
-            if verify_res.get("Status") == "Success":
-                v_rec = verify_res.get("Value", {})
-                actual_vcpus = int(v_rec.get("VCPUs_at_startup", target_vcpus))
+            if verify_res.get("Status") != "Success":
+                return {
+                    "success": False,
+                    "error": f"Verification failed: XenAPI could not read back VM configuration: {verify_res.get('ErrorDescription')}",
+                    "vm_name": vm_name,
+                    "vm_uuid": vm_uuid,
+                    "previous_value": prev_vcpus,
+                    "requested_value": target_vcpus
+                }
 
-            logger.info(f"Dynamic CPU allocation successful for {vm_name}: {prev_vcpus} -> {actual_vcpus} vCPUs.")
+            v_rec = verify_res.get("Value", {})
+            actual_vcpus = int(v_rec.get("VCPUs_at_startup") or v_rec.get("VCPUs_max") or 0)
+            if actual_vcpus != target_vcpus:
+                return {
+                    "success": False,
+                    "error": f"Verification failed: Xen reported vCPUs as {actual_vcpus}, expected {target_vcpus}.",
+                    "vm_name": vm_name,
+                    "vm_uuid": vm_uuid,
+                    "previous_value": prev_vcpus,
+                    "requested_value": target_vcpus,
+                    "actual_value": actual_vcpus
+                }
+
+            logger.info(f"Dynamic CPU allocation successful and verified for {vm_name}: {prev_vcpus} -> {actual_vcpus} vCPUs.")
             return {
                 "success": True,
                 "vm_name": vm_name,
@@ -550,15 +585,6 @@ class XenAPIClient:
                 "vm_identifier": vm_identifier
             }
 
-        # Boundary checks against configured min/max
-        if target_ram_mb < self.config.min_ram_mb or target_ram_mb > self.config.max_ram_mb:
-            return {
-                "success": False,
-                "error": f"Target RAM {target_ram_mb} MB violates configured limits [{self.config.min_ram_mb} MB, {self.config.max_ram_mb} MB].",
-                "vm_identifier": vm_identifier,
-                "requested_value": target_ram_mb
-            }
-
         vm = self.find_vm(vm_identifier)
         if not vm:
             return {
@@ -571,6 +597,20 @@ class XenAPIClient:
         vm_name = vm["name"]
         vm_uuid = vm["uuid"]
         power_state = vm.get("power_state")
+
+        # Boundary checks against VM-specific policy
+        policy = self.config.get_vm_policy(vm_name)
+        min_ram_mb = policy.get("min_ram_mb", self.config.min_ram_mb)
+        max_ram_mb = policy.get("max_ram_mb", self.config.max_ram_mb)
+
+        if target_ram_mb < min_ram_mb or target_ram_mb > max_ram_mb:
+            return {
+                "success": False,
+                "error": f"Target RAM {target_ram_mb} MB violates configured limits [{min_ram_mb} MB, {max_ram_mb} MB] for VM '{vm_name}'.",
+                "vm_name": vm_name,
+                "vm_uuid": vm_uuid,
+                "requested_value": target_ram_mb
+            }
 
         if power_state not in ("Running", "Halted"):
             return {
@@ -664,14 +704,32 @@ class XenAPIClient:
                 if target_res.get("Status") != "Success":
                     logger.warning(f"set_memory_target_live returned non-success (may be unsupported by guest agent): {target_res.get('ErrorDescription')}")
 
-            # Verify actual allocation
+            # Verify actual allocation by re-reading VM configuration
             verify_res = self.proxy.VM.get_record(self.session_id, vm_ref)
-            actual_ram_mb = target_ram_mb
-            if verify_res.get("Status") == "Success":
-                v_rec = verify_res.get("Value", {})
-                actual_ram_mb = round(int(v_rec.get("memory_dynamic_max", target_bytes)) / (1024 * 1024), 1)
+            if verify_res.get("Status") != "Success":
+                return {
+                    "success": False,
+                    "error": f"Verification failed: XenAPI could not read back VM configuration: {verify_res.get('ErrorDescription')}",
+                    "vm_name": vm_name,
+                    "vm_uuid": vm_uuid,
+                    "previous_value": prev_dynamic_max_mb,
+                    "requested_value": target_ram_mb
+                }
 
-            logger.info(f"Dynamic RAM ballooning successful for {vm_name}: {prev_dynamic_max_mb} MB -> {actual_ram_mb} MB.")
+            v_rec = verify_res.get("Value", {})
+            actual_ram_mb = round(int(v_rec.get("memory_dynamic_max", 0)) / (1024 * 1024), 1)
+            if abs(actual_ram_mb - target_ram_mb) > 1.0:
+                return {
+                    "success": False,
+                    "error": f"Verification failed: Xen reported dynamic max as {actual_ram_mb} MB, expected {target_ram_mb} MB.",
+                    "vm_name": vm_name,
+                    "vm_uuid": vm_uuid,
+                    "previous_value": prev_dynamic_max_mb,
+                    "requested_value": target_ram_mb,
+                    "actual_value": actual_ram_mb
+                }
+
+            logger.info(f"Dynamic RAM ballooning successful and verified for {vm_name}: {prev_dynamic_max_mb} MB -> {actual_ram_mb} MB.")
             return {
                 "success": True,
                 "vm_name": vm_name,

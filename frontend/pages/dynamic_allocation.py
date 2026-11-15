@@ -3,10 +3,10 @@ Streamlit Page: Dynamic Resource Allocation Control Panel (Phase 3)
 Project: Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services
 
 Provides administrator controls for automated and manual Xen hypervisor scaling:
-- Automation status & Emergency Stop
-- Real-time VM resource cards (vCPU, Dynamic RAM limits)
+- Automation status, XenAPI connection & Emergency Stop
+- Real-time VM resource cards (configured limits vs. actual allocations, guest ballooning/hotplug capabilities)
 - Elasticity recommendations table & 1-click apply
-- Manual CPU & RAM adjustment with confirmation gates
+- Manual CPU & RAM adjustment with confirmation gates and per-VM limits validation
 - Audit history & Static vs. Dynamic efficiency analysis
 """
 
@@ -73,11 +73,15 @@ def render_dynamic_allocation_page():
     poll_interval = alloc_data.get("poll_interval_sec", 5)
     last_update = metrics_data.get("last_successful_update_iso") or "Never"
 
-    # Get last action from history
-    last_action_str = "None recorded"
-    if history_records:
+    # Get last XenAPI operation
+    last_op = alloc_data.get("last_xen_operation")
+    if last_op:
+        last_op_str = f"✅ {last_op.get('operation')} on {last_op.get('vm_name')} (Actual: {last_op.get('actual_value')}) at {last_op.get('timestamp_iso', '')[:19]}"
+    elif history_records:
         latest_act = history_records[0]
-        last_action_str = f"{latest_act.get('action_type')} on {latest_act.get('vm_name')} ({latest_act.get('execution_status')}) at {latest_act.get('created_at', '')[:19]}"
+        last_op_str = f"{latest_act.get('action_type')} on {latest_act.get('vm_name')} ({latest_act.get('execution_status')}) at {latest_act.get('created_at', '')[:19]}"
+    else:
+        last_op_str = "None executed yet"
 
     # =============================================================
     # SECTION A: AUTOMATION STATUS
@@ -105,11 +109,18 @@ def render_dynamic_allocation_page():
     with sc4:
         render_metric_card("Polling Interval", f"{poll_interval}s", f"Last sync: {last_update[-8:] if len(last_update) > 8 else last_update}")
 
-    st.caption(f"**Last Allocation Event:** {last_action_str}")
+    st.markdown(
+        f"""
+        <div style="background:#F1F5F9; border:1px solid #CBD5E1; padding:10px 14px; border-radius:6px; margin-top:8px; font-size:0.85rem; color:#334155;">
+            <b>⚡ Last Successful XenAPI Operation:</b> <code>{last_op_str}</code>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
     st.markdown("---")
 
     # =============================================================
-    # SECTION B: VM RESOURCE CARDS
+    # SECTION B: VM RESOURCE CARDS (Configured vs Actual Allocations)
     # =============================================================
     st.markdown("### 🖥️ **B. Virtual Machine Resource Allocations & Telemetry**")
 
@@ -135,15 +146,22 @@ def render_dynamic_allocation_page():
     app_rec = recs_map.get(app_vm.get("name", app_vm_name), recs_map.get(app_vm_name, {}))
     db_rec = recs_map.get(db_vm.get("name", db_vm_name), recs_map.get(db_vm_name, {}))
 
+    app_policy = alloc_data.get("app_vm_policy", {})
+    db_policy = alloc_data.get("db_vm_policy", {})
+
     col_vm1, col_vm2 = st.columns(2)
 
     with col_vm1:
         st.markdown(
             f"""
             <div style="background:#F8FAFC; border:1px solid #CBD5E1; border-top:4px solid #3B82F6; padding:16px; border-radius:10px; margin-bottom:15px;">
-                <h4 style="margin:0 0 8px 0; color:#1E3A8A;">🖥️ Application VM: {app_vm.get('name', app_vm_name)}</h4>
-                <div style="font-size:0.8rem; color:#64748B; margin-bottom:12px;">
+                <h4 style="margin:0 0 6px 0; color:#1E3A8A;">🖥️ Application VM: {app_vm.get('name', app_vm_name)}</h4>
+                <div style="font-size:0.8rem; color:#64748B; margin-bottom:8px;">
                     UUID: <code>{app_vm.get('uuid', 'N/A')}</code> | State: <b>{app_vm.get('power_state', 'N/A')}</b>
+                </div>
+                <div style="font-size:0.75rem; color:#475569; margin-bottom:12px;">
+                    Guest Ballooning: <b>{'🟢 Supported' if app_vm.get('supports_ballooning') else '⚪ Unsupported'}</b> |
+                    vCPU Hotplug: <b>{'🟢 Supported' if app_vm.get('supports_vcpu_hotplug') else '⚪ Unsupported'}</b>
                 </div>
             </div>
             """,
@@ -151,21 +169,27 @@ def render_dynamic_allocation_page():
         )
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("vCPUs Allocated", f"{app_vm.get('vcpu_count', 'N/A')}")
+            st.metric("vCPUs (Actual / Limit)", f"{app_vm.get('vcpu_count', 'N/A')} / {app_policy.get('max_vcpus', 4)}")
             st.metric("CPU Utilization", f"{app_vm.get('cpu_percent', 'N/A')}%")
             st.metric("Recommended vCPUs", f"{app_rec.get('recommended_vcpus', app_vm.get('vcpu_count', 'N/A'))}")
+            st.caption(f"Configured vCPU Range: **{app_policy.get('min_vcpus', 1)} – {app_policy.get('max_vcpus', 4)}**")
         with c2:
             st.metric("Allocated Dynamic RAM", f"{app_vm.get('allocated_ram_mb', 'N/A')} MB")
-            st.metric("RAM Utilization", f"{app_vm.get('ram_percent', 'N/A')}%")
+            st.metric("Actual Guest Used RAM", f"{app_vm.get('used_ram_mb', 'N/A')} MB ({app_vm.get('ram_percent', 'N/A')}%)")
             st.metric("Recommended RAM", f"{app_rec.get('recommended_ram_mb', app_vm.get('allocated_ram_mb', 'N/A'))} MB")
+            st.caption(f"Configured RAM Range: **{app_policy.get('min_ram_mb', 2048)} – {app_policy.get('max_ram_mb', 6144)} MB**")
 
     with col_vm2:
         st.markdown(
             f"""
             <div style="background:#F8FAFC; border:1px solid #CBD5E1; border-top:4px solid #10B981; padding:16px; border-radius:10px; margin-bottom:15px;">
-                <h4 style="margin:0 0 8px 0; color:#065F46;">🗄️ Database VM: {db_vm.get('name', db_vm_name)}</h4>
-                <div style="font-size:0.8rem; color:#64748B; margin-bottom:12px;">
+                <h4 style="margin:0 0 6px 0; color:#065F46;">🗄️ Database VM: {db_vm.get('name', db_vm_name)}</h4>
+                <div style="font-size:0.8rem; color:#64748B; margin-bottom:8px;">
                     UUID: <code>{db_vm.get('uuid', 'N/A')}</code> | State: <b>{db_vm.get('power_state', 'N/A')}</b>
+                </div>
+                <div style="font-size:0.75rem; color:#475569; margin-bottom:12px;">
+                    Guest Ballooning: <b>{'🟢 Supported' if db_vm.get('supports_ballooning') else '⚪ Unsupported'}</b> |
+                    Policy: <b>{'🔒 Preserving Initial Baseline' if db_policy.get('preserve_initial') else '⚡ Elastic'}</b>
                 </div>
             </div>
             """,
@@ -173,13 +197,15 @@ def render_dynamic_allocation_page():
         )
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("vCPUs Allocated", f"{db_vm.get('vcpu_count', 'N/A')}")
+            st.metric("vCPUs (Actual / Limit)", f"{db_vm.get('vcpu_count', 'N/A')} / {db_policy.get('max_vcpus', 4)}")
             st.metric("CPU Utilization", f"{db_vm.get('cpu_percent', 'N/A')}%")
             st.metric("Recommended vCPUs", f"{db_rec.get('recommended_vcpus', db_vm.get('vcpu_count', 'N/A'))}")
+            st.caption(f"Configured vCPU Range: **{db_policy.get('min_vcpus', 1)} – {db_policy.get('max_vcpus', 4)}**")
         with c2:
             st.metric("Allocated Dynamic RAM", f"{db_vm.get('allocated_ram_mb', 'N/A')} MB")
-            st.metric("RAM Utilization", f"{db_vm.get('ram_percent', 'N/A')}%")
+            st.metric("Actual Guest Used RAM", f"{db_vm.get('used_ram_mb', 'N/A')} MB ({db_vm.get('ram_percent', 'N/A')}%)")
             st.metric("Recommended RAM", f"{db_rec.get('recommended_ram_mb', db_vm.get('allocated_ram_mb', 'N/A'))} MB")
+            st.caption(f"Configured RAM Range: **{db_policy.get('min_ram_mb', 1024)} – {db_policy.get('max_ram_mb', 4096)} MB**")
 
     st.markdown("---")
 
@@ -310,24 +336,30 @@ def render_dynamic_allocation_page():
             [app_vm.get("name", app_vm_name), db_vm.get("name", db_vm_name)],
             key="cpu_vm_select"
         )
-        cur_vcpus = int(app_vm.get("vcpu_count", 1) if target_vm_cpu == app_vm.get("name", app_vm_name) else db_vm.get("vcpu_count", 1))
+        is_app_selected = (target_vm_cpu == app_vm.get("name", app_vm_name))
+        selected_policy = app_policy if is_app_selected else db_policy
+        vm_target_data = app_vm if is_app_selected else db_vm
+
+        cur_vcpus = int(vm_target_data.get("vcpu_count", 1))
+        min_v = int(selected_policy.get("min_vcpus", 1))
+        max_v = int(selected_policy.get("max_vcpus", 4))
 
         new_vcpus = st.slider(
-            "Target vCPU Count",
-            min_value=1,
-            max_value=4,
-            value=cur_vcpus,
+            f"Target vCPU Count ({target_vm_cpu})",
+            min_value=min_v,
+            max_value=max_v,
+            value=max(min_v, min(max_v, cur_vcpus)),
             step=1,
-            help="Configured boundary: 1 to 4 vCPUs"
+            help=f"Configured boundary for {target_vm_cpu}: {min_v} to {max_v} vCPUs"
         )
         cpu_reason = st.text_input("Operational Reason", value="Administrator manual capacity adjustment", key="cpu_reason_input")
         cpu_confirm = st.checkbox(f"⚠️ I confirm live vCPU modification of '{target_vm_cpu}' to {new_vcpus} vCPUs.", key="cpu_confirm_chk")
 
         if st.button("🚀 Apply vCPU Modification", disabled=not cpu_confirm or (new_vcpus == cur_vcpus), type="primary"):
-            with st.spinner("Actuating XenAPI set_VCPUs_number_live..."):
+            with st.spinner("Actuating XenAPI set_VCPUs_number_live & verifying..."):
                 res = api_apply_manual_cpu(target_vm_cpu, new_vcpus, reason=cpu_reason)
             if res.get("success"):
-                st.success(f"Successfully scaled vCPUs for {target_vm_cpu} to {res.get('actual_value')}!")
+                st.success(f"Successfully scaled vCPUs for {target_vm_cpu} to {res.get('actual_value')} (Verified via XenAPI)!")
                 time.sleep(1)
                 st.rerun()
             else:
@@ -343,25 +375,32 @@ def render_dynamic_allocation_page():
             [app_vm.get("name", app_vm_name), db_vm.get("name", db_vm_name)],
             key="ram_vm_select"
         )
-        cur_ram = float(app_vm.get("allocated_ram_mb", 1024.0) if target_vm_ram == app_vm.get("name", app_vm_name) else db_vm.get("allocated_ram_mb", 1024.0))
+        is_app_ram_selected = (target_vm_ram == app_vm.get("name", app_vm_name))
+        selected_ram_policy = app_policy if is_app_ram_selected else db_policy
+        vm_target_ram_data = app_vm if is_app_ram_selected else db_vm
 
-        ram_options = [1024, 1536, 2048, 2560, 3072, 3584, 4096]
+        cur_ram = float(vm_target_ram_data.get("allocated_ram_mb", 1024.0))
+        min_r = int(selected_ram_policy.get("min_ram_mb", 1024))
+        max_r = int(selected_ram_policy.get("max_ram_mb", 6144 if is_app_ram_selected else 4096))
+
+        # Dynamic options within VM policy range
+        ram_options = [r for r in [1024, 1536, 2048, 2560, 3072, 3584, 4096, 4608, 5120, 5632, 6144] if min_r <= r <= max_r]
         closest_ram = min(ram_options, key=lambda x: abs(x - cur_ram))
 
         new_ram = st.select_slider(
-            "Target Dynamic Memory Ceiling (MB)",
+            f"Target Dynamic Memory Ceiling for {target_vm_ram} (MB)",
             options=ram_options,
             value=closest_ram,
-            help="Dynamic limits: 1024 MB minimum, 4096 MB maximum (512 MB step increments)"
+            help=f"Dynamic limits for {target_vm_ram}: {min_r} MB minimum, {max_r} MB maximum (512 MB step increments)"
         )
         ram_reason = st.text_input("Operational Reason", value="Administrator dynamic memory adjustment", key="ram_reason_input")
         ram_confirm = st.checkbox(f"⚠️ I confirm dynamic memory adjustment of '{target_vm_ram}' to {new_ram} MB.", key="ram_confirm_chk")
 
         if st.button("🎈 Apply Memory Ballooning", disabled=not ram_confirm or (new_ram == cur_ram), type="primary"):
-            with st.spinner("Actuating XenAPI set_memory_dynamic_range & ballooning..."):
+            with st.spinner("Actuating XenAPI set_memory_dynamic_range & verifying..."):
                 res = api_apply_manual_ram(target_vm_ram, float(new_ram), reason=ram_reason)
             if res.get("success"):
-                st.success(f"Successfully adjusted dynamic memory for {target_vm_ram} to {res.get('actual_value')} MB!")
+                st.success(f"Successfully adjusted dynamic memory for {target_vm_ram} to {res.get('actual_value')} MB (Verified via XenAPI)!")
                 time.sleep(1)
                 st.rerun()
             else:
@@ -423,7 +462,7 @@ def render_dynamic_allocation_page():
         st.markdown(
             """
             In traditional static virtualization, virtual machines must be provisioned for theoretical peak capacity
-            (e.g., 4 vCPUs and 4096 MB RAM per VM). This results in massive hypervisor resource waste during off-peak hours.
+            (e.g., 4 vCPUs and 4096-6144 MB RAM per VM). This results in massive hypervisor resource waste during off-peak hours.
 
             **Xen Dynamic Resource Allocation Advantages:**
             - **vCPU Elasticity:** Cores are hot-plugged on demand (>80% utilization) and reclaimed (<25%) when idle.
@@ -434,8 +473,8 @@ def render_dynamic_allocation_page():
 
         comp_data = {
             "Metric / Architecture": ["Allocated vCPUs (Average)", "Allocated RAM (Average)", "Hypervisor Headroom", "Responsiveness to Load Spikes", "Downtime Required"],
-            "Static Overprovisioning": ["4 vCPUs (Locked)", "4096 MB (Locked)", "Exhausted (Low VM density)", "None (Rigid)", "Reboot required to resize"],
-            "Dynamic Xen Elasticity (Phase 3)": ["1-2 vCPUs (Elastic)", "1024-2048 MB (Ballooned)", "High (Reclaimed for other VMs)", "Autonomous Scale-Up in <5s", "Zero Downtime (Live XenAPI)"]
+            "Static Overprovisioning": ["4 vCPUs (Locked)", "4096-6144 MB (Locked)", "Exhausted (Low VM density)", "None (Rigid)", "Reboot required to resize"],
+            "Dynamic Xen Elasticity (Phase 3)": ["1-2 vCPUs (Elastic)", "2048-4096 MB (Ballooned)", "High (Reclaimed for other VMs)", "Autonomous Scale-Up in <5s", "Zero Downtime (Live XenAPI)"]
         }
         st.table(pd.DataFrame(comp_data))
 

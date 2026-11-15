@@ -378,38 +378,38 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertEqual(dec["recommended_vcpus"], 1)
         self.assertIn("minimum boundary", dec["rationale"])
 
-    # 14. Maximum RAM Boundary Enforcement (4096 MB)
+    # 14. Maximum RAM Boundary Enforcement (6144 MB for Alpine-Linux)
     def test_14_maximum_ram_enforcement(self):
-        """Verify that at MAX_RAM_MB (4096 MB), scale-up is blocked and held."""
+        """Verify that at MAX_RAM_MB (6144 MB), scale-up is blocked and held."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
             "vcpu_count": 2,
-            "allocated_ram_mb": 4096.0,
+            "allocated_ram_mb": 6144.0,
             "cpu_percent": 50.0,
             "ram_percent": 95.0
         }
         self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["ram_action"], "HOLD")
-        self.assertEqual(dec["recommended_ram_mb"], 4096.0)
+        self.assertEqual(dec["recommended_ram_mb"], 6144.0)
         self.assertIn("maximum boundary", dec["rationale"])
 
-    # 15. Minimum RAM Boundary Enforcement (1024 MB)
+    # 15. Minimum RAM Boundary Enforcement (2048 MB for Alpine-Linux)
     def test_15_minimum_ram_enforcement(self):
-        """Verify that at MIN_RAM_MB (1024 MB), scale-down is blocked and held."""
+        """Verify that at MIN_RAM_MB (2048 MB), scale-down is blocked and held."""
         vm_metrics = {
             "name": "Alpine-Linux",
             "uuid": "app-vm-uuid-111",
             "vcpu_count": 2,
-            "allocated_ram_mb": 1024.0,
+            "allocated_ram_mb": 2048.0,
             "cpu_percent": 50.0,
             "ram_percent": 15.0
         }
         self.engine.evaluate_vm(vm_metrics)
         dec = self.engine.evaluate_vm(vm_metrics)
         self.assertEqual(dec["ram_action"], "HOLD")
-        self.assertEqual(dec["recommended_ram_mb"], 1024.0)
+        self.assertEqual(dec["recommended_ram_mb"], 2048.0)
         self.assertIn("minimum boundary", dec["rationale"])
 
     # 16. Hypervisor Host Physical Capacity Restrictions
@@ -607,6 +607,181 @@ class TestDynamicAllocation(unittest.TestCase):
         self.assertEqual(res["requested_value"], 2560.0)
         self.assertEqual(res["actual_value"], 2560.0)
         self.assertEqual(res["previous_value"], 2048.0)
+
+    # 23. Verification failure handling for vCPU
+    def test_23_verification_failure_vcpu(self):
+        """Verify that if Xen post-actuation verification fails (value unchanged), success=False is returned."""
+        client = self._create_mock_client()
+        client.proxy.VM.get_record.side_effect = [
+            # Pre-change
+            {
+                "Status": "Success",
+                "Value": {
+                    "VCPUs_max": "4",
+                    "VCPUs_at_startup": "2",
+                    "power_state": "Running"
+                }
+            },
+            # Post-change readback returns unchanged or mismatched value
+            {
+                "Status": "Success",
+                "Value": {
+                    "VCPUs_max": "4",
+                    "VCPUs_at_startup": "2",  # Failed to update in Xen
+                    "power_state": "Running"
+                }
+            }
+        ]
+        client.proxy.VM.set_VCPUs_number_live.return_value = {"Status": "Success"}
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {"Status": "Success"}
+
+        res = client.set_vm_vcpus("Alpine-Linux", 3)
+        self.assertFalse(res["success"])
+        self.assertEqual(res["actual_value"], 2)
+        self.assertIn("Verification failed", res["error"])
+
+    # 24. Verification failure handling for RAM dynamic memory
+    def test_24_verification_failure_ram(self):
+        """Verify that if Xen post-actuation RAM verification fails, success=False is returned."""
+        client = self._create_mock_client()
+        client.proxy.VM.get_record.side_effect = [
+            # Pre-change
+            {
+                "Status": "Success",
+                "Value": {
+                    "memory_static_min": str(512 * 1024 * 1024),
+                    "memory_dynamic_min": str(1024 * 1024 * 1024),
+                    "memory_dynamic_max": str(2048 * 1024 * 1024),
+                    "memory_static_max": str(4096 * 1024 * 1024),
+                    "power_state": "Running"
+                }
+            },
+            # Post-change readback returns unchanged memory
+            {
+                "Status": "Success",
+                "Value": {
+                    "memory_static_min": str(512 * 1024 * 1024),
+                    "memory_dynamic_min": str(1024 * 1024 * 1024),
+                    "memory_dynamic_max": str(2048 * 1024 * 1024),  # Not updated
+                    "memory_static_max": str(4096 * 1024 * 1024),
+                    "power_state": "Running"
+                }
+            }
+        ]
+        client.proxy.VM.set_memory_dynamic_range.return_value = {"Status": "Success"}
+        client.proxy.VM.set_memory_target_live.return_value = {"Status": "Success"}
+
+        # Host capacity ok
+        client.proxy.host.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {"ref_host": {"uuid": "h-uuid", "name_label": "XCP-ng", "metrics": "ref_hm"}}
+        }
+        client.proxy.host_metrics.get_record.return_value = {
+            "Status": "Success",
+            "Value": {"memory_total": str(8192 * 1024 * 1024), "memory_free": str(4096 * 1024 * 1024)}
+        }
+        client.proxy.host_cpu.get_all_records.return_value = {"Status": "Success", "Value": {}}
+
+        res = client.set_vm_dynamic_memory("Alpine-Linux", 2560.0)
+        self.assertFalse(res["success"])
+        self.assertIn("Verification failed", res["error"])
+
+    # 25. Per-VM Policy for Application VM (Alpine-Linux: 2048-6144 MB RAM, 1-4 vCPUs)
+    def test_25_per_vm_policy_application_vm(self):
+        """Verify that Application VM policy boundaries (2048-6144 MB RAM, 1-4 vCPUs) are strictly enforced."""
+        client = self._create_mock_client()
+        # Out of bounds RAM < 2048 MB
+        res_low_ram = client.set_vm_dynamic_memory("Alpine-Linux", 1024.0)
+        self.assertFalse(res_low_ram["success"])
+        self.assertIn("violates configured limits", res_low_ram["error"])
+
+        # Out of bounds RAM > 6144 MB
+        res_high_ram = client.set_vm_dynamic_memory("Alpine-Linux", 8192.0)
+        self.assertFalse(res_high_ram["success"])
+        self.assertIn("violates configured limits", res_high_ram["error"])
+
+        # Out of bounds vCPUs < 1
+        res_low_cpu = client.set_vm_vcpus("Alpine-Linux", 0)
+        self.assertFalse(res_low_cpu["success"])
+        self.assertIn("violates configured limits", res_low_cpu["error"])
+
+        # Out of bounds vCPUs > 4
+        res_high_cpu = client.set_vm_vcpus("Alpine-Linux", 5)
+        self.assertFalse(res_high_cpu["success"])
+        self.assertIn("violates configured limits", res_high_cpu["error"])
+
+    # 26. Per-VM Policy for Database VM: Baseline Allocation Preservation
+    def test_26_per_vm_policy_database_vm_preservation(self):
+        """Verify that Alpine-DB baseline allocation is preserved when preserve_initial=True."""
+        vm_metrics = {
+            "name": "Alpine-DB",
+            "uuid": "db-vm-uuid-222",
+            "vcpu_count": 2,
+            "allocated_ram_mb": 2048.0,
+            "cpu_percent": 95.0,  # High CPU
+            "ram_percent": 95.0   # High RAM
+        }
+        dec = self.engine.evaluate_vm(vm_metrics)
+        self.assertEqual(dec["cpu_action"], "HOLD")
+        self.assertEqual(dec["ram_action"], "HOLD")
+        self.assertIn("Preserving initial Alpine-DB resource baseline", dec["rationale"])
+
+    # 27. Manual Allocation Works When Automatic Allocation is Disabled
+    def test_27_manual_allocation_works_when_auto_disabled(self):
+        """Verify that manual administrator override operates even when ALLOCATION_MODE='manual'."""
+        client = self._create_mock_client()
+        monitor = XenResourceMonitor(self.config)
+        monitor.client = client
+        monitor.set_allocation_mode("manual")
+        self.assertEqual(monitor.get_allocation_status()["allocation_mode"], "manual")
+
+        # Mock XenAPI for vCPU set
+        client.proxy.VM.get_record.side_effect = [
+            # Pre-change
+            {"Status": "Success", "Value": {"VCPUs_max": "4", "VCPUs_at_startup": "2", "power_state": "Running"}},
+            # Post-change verification
+            {"Status": "Success", "Value": {"VCPUs_max": "4", "VCPUs_at_startup": "3", "power_state": "Running"}},
+            # Pre-change RAM
+            {"Status": "Success", "Value": {
+                "memory_static_min": str(512 * 1024 * 1024), "memory_dynamic_min": str(1024 * 1024 * 1024),
+                "memory_dynamic_max": str(2048 * 1024 * 1024), "memory_static_max": str(4096 * 1024 * 1024),
+                "power_state": "Running"
+            }},
+            # Post-change RAM verification
+            {"Status": "Success", "Value": {
+                "memory_static_min": str(512 * 1024 * 1024), "memory_dynamic_min": str(1024 * 1024 * 1024),
+                "memory_dynamic_max": str(2560 * 1024 * 1024), "memory_static_max": str(4096 * 1024 * 1024),
+                "power_state": "Running"
+            }}
+        ]
+        client.proxy.VM.set_VCPUs_number_live.return_value = {"Status": "Success"}
+        client.proxy.VM.set_VCPUs_at_startup.return_value = {"Status": "Success"}
+        client.proxy.VM.set_memory_dynamic_range.return_value = {"Status": "Success"}
+        client.proxy.VM.set_memory_target_live.return_value = {"Status": "Success"}
+        client.proxy.host.get_all_records.return_value = {
+            "Status": "Success",
+            "Value": {"ref_host": {"uuid": "h-uuid", "name_label": "XCP-ng", "metrics": "ref_hm"}}
+        }
+        client.proxy.host_metrics.get_record.return_value = {
+            "Status": "Success",
+            "Value": {"memory_total": str(8192 * 1024 * 1024), "memory_free": str(4096 * 1024 * 1024)}
+        }
+        client.proxy.host_cpu.get_all_records.return_value = {"Status": "Success", "Value": {}}
+
+        # Manual CPU
+        cpu_res = monitor.apply_manual_cpu("Alpine-Linux", 3, initiated_by="admin")
+        self.assertTrue(cpu_res["success"])
+        self.assertEqual(cpu_res["actual_value"], 3)
+
+        # Manual RAM
+        ram_res = monitor.apply_manual_ram("Alpine-Linux", 2560.0, initiated_by="admin")
+        self.assertTrue(ram_res["success"])
+        self.assertEqual(ram_res["actual_value"], 2560.0)
+
+        # Verify last_xen_operation
+        status = monitor.get_allocation_status()
+        self.assertIsNotNone(status.get("last_xen_operation"))
+        self.assertEqual(status["last_xen_operation"]["status"], "verified")
 
 
 if __name__ == "__main__":

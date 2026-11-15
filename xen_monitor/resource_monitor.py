@@ -44,6 +44,7 @@ class XenResourceMonitor:
         self.last_successful_update: Optional[float] = None
         self.consecutive_failures: int = 0
         self.last_error: Optional[str] = None
+        self.last_xen_operation: Optional[Dict[str, Any]] = None
 
         # Cached latest snapshot
         self._latest_state: Dict[str, Any] = {
@@ -54,6 +55,7 @@ class XenResourceMonitor:
             "all_discovered_vms": [],
             "recommendations": {},
             "last_successful_update": None,
+            "last_xen_operation": None,
             "error": None
         }
 
@@ -242,6 +244,17 @@ class XenResourceMonitor:
                                 "error_message": err,
                                 "initiated_by": "auto"
                             })
+                            if status == "success":
+                                self.last_xen_operation = {
+                                    "timestamp": now,
+                                    "timestamp_iso": iso_time,
+                                    "operation": "auto_scale_cpu",
+                                    "vm_name": target_vm_name,
+                                    "resource_type": "cpu",
+                                    "requested_value": target_vcpus,
+                                    "actual_value": act_val,
+                                    "status": "verified"
+                                }
 
                     # Check RAM automated scaling
                     if rec.get("ram_action") in ("SCALE_UP", "SCALE_DOWN"):
@@ -254,6 +267,16 @@ class XenResourceMonitor:
                             act_val = res.get("actual_value", rec.get("current_ram_mb")) if status == "success" else None
                             if status == "success":
                                 self.allocation_engine.record_action_applied(target_vm_name, "ram")
+                                self.last_xen_operation = {
+                                    "timestamp": now,
+                                    "timestamp_iso": iso_time,
+                                    "operation": "auto_scale_ram",
+                                    "vm_name": target_vm_name,
+                                    "resource_type": "ram",
+                                    "requested_value": target_ram,
+                                    "actual_value": act_val,
+                                    "status": "verified"
+                                }
                             self._persist_allocation_action({
                                 "vm_name": target_vm_name,
                                 "vm_uuid": rec.get("vm_uuid"),
@@ -327,6 +350,16 @@ class XenResourceMonitor:
 
         if status == "success":
             self.allocation_engine.record_action_applied(vm_name, "cpu")
+            self.last_xen_operation = {
+                "timestamp": time.time(),
+                "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                "operation": "manual_cpu",
+                "vm_name": vm_name,
+                "resource_type": "cpu",
+                "requested_value": target_vcpus,
+                "actual_value": res.get("actual_value"),
+                "status": "verified"
+            }
 
         self._persist_allocation_action({
             "vm_name": vm_name,
@@ -352,6 +385,16 @@ class XenResourceMonitor:
 
         if status == "success":
             self.allocation_engine.record_action_applied(vm_name, "ram")
+            self.last_xen_operation = {
+                "timestamp": time.time(),
+                "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                "operation": "manual_ram",
+                "vm_name": vm_name,
+                "resource_type": "ram",
+                "requested_value": target_ram_mb,
+                "actual_value": res.get("actual_value"),
+                "status": "verified"
+            }
 
         self._persist_allocation_action({
             "vm_name": vm_name,
@@ -607,6 +650,9 @@ class XenResourceMonitor:
             "poll_interval_sec": self.config.poll_interval_sec,
             "cooldown_period_sec": self.config.cooldown_period_sec,
             "consecutive_breach_threshold": self.config.consecutive_breach_threshold,
+            "last_xen_operation": self.last_xen_operation,
+            "app_vm_policy": self.config.get_vm_policy(self.config.app_vm_name),
+            "db_vm_policy": self.config.get_vm_policy(self.config.db_vm_name),
             "thresholds": {
                 "cpu_scale_up_threshold": self.config.cpu_scale_up_threshold,
                 "cpu_scale_down_threshold": self.config.cpu_scale_down_threshold,
