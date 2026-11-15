@@ -235,7 +235,21 @@ class AllocationEngine:
         ram_up_key = f"{clean_name}:ram:scale_up"
         ram_down_key = f"{clean_name}:ram:scale_down"
 
-        if ram_pct > ram_scale_up_thresh:
+        # Check if guest memory metrics are genuinely available
+        guest_metrics_unavailable = (
+            vm_metrics.get("guest_ram_percent") is None and 
+            vm_metrics.get("memory_status") == "guest_metrics_unavailable"
+        )
+
+        if guest_metrics_unavailable:
+            self._consecutive_breaches[ram_up_key] = 0
+            self._consecutive_breaches[ram_down_key] = 0
+            ram_action = "HOLD"
+            reasons.append(
+                f"Guest memory telemetry unavailable for {vm_name}. "
+                "Dynamic RAM scaling withheld to prevent unsafe guest kernel OOM."
+            )
+        elif ram_pct > ram_scale_up_thresh:
             self._consecutive_breaches[ram_up_key] = self._consecutive_breaches.get(ram_up_key, 0) + 1
             self._consecutive_breaches[ram_down_key] = 0
             breach_count = self._consecutive_breaches[ram_up_key]

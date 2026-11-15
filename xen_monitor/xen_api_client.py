@@ -6,6 +6,7 @@ and guest telemetry without hardcoding or fabrications.
 """
 
 import ssl
+import time
 import socket
 import logging
 import xmlrpc.client
@@ -37,6 +38,9 @@ class TimeoutSafeTransport(xmlrpc.client.SafeTransport):
         return conn
 
 class XenAPIClient:
+    EXPECTED_APP_VM_UUID = "01cdb87c-408f-72bc-449c-0364a8e69647"
+    EXPECTED_DB_VM_UUID = "0a6dec09-0466-0079-4b66-80704b59587d"
+
     def __init__(self, config: Optional[MonitorConfig] = None):
         self.config = config or MonitorConfig()
         self.session_id: Optional[str] = None
@@ -44,6 +48,8 @@ class XenAPIClient:
         self.is_connected: bool = False
         self.last_error: Optional[str] = None
         self.host_ref: Optional[str] = None
+        self._cpu_usage_history: Dict[str, Dict[str, Any]] = {}
+        self._local_cpu_sample: Optional[Dict[str, float]] = None
 
     def connect(self) -> bool:
         """
@@ -291,22 +297,121 @@ class XenAPIClient:
         logger.warning(f"VM '{clean_target}' was not discovered on XCP-ng host. Available VMs: {available_names}")
         return None
 
+    def _read_local_linux_guest_cpu(self) -> Optional[float]:
+        """Read guest CPU utilization from Linux /proc/stat using consecutive samples."""
+        import os
+        if not os.path.exists("/proc/stat"):
+            return None
+        try:
+            with open("/proc/stat", "r") as f:
+                first_line = f.readline()
+            parts = first_line.split()
+            if len(parts) >= 5 and parts[0] == "cpu":
+                user = float(parts[1])
+                nice = float(parts[2])
+                system = float(parts[3])
+                idle = float(parts[4])
+                iowait = float(parts[5]) if len(parts) > 5 else 0.0
+                irq = float(parts[6]) if len(parts) > 6 else 0.0
+                softirq = float(parts[7]) if len(parts) > 7 else 0.0
+                steal = float(parts[8]) if len(parts) > 8 else 0.0
+
+                busy = user + nice + system + irq + softirq + steal
+                total = busy + idle + iowait
+                now = time.time()
+
+                if self._local_cpu_sample is not None:
+                    prev_busy = self._local_cpu_sample["busy"]
+                    prev_total = self._local_cpu_sample["total"]
+                    d_busy = busy - prev_busy
+                    d_total = total - prev_total
+                    self._local_cpu_sample = {"busy": busy, "total": total, "timestamp": now}
+                    if d_total > 0 and d_busy >= 0:
+                        pct = round((d_busy / d_total) * 100.0, 1)
+                        return min(100.0, max(0.0, pct))
+                else:
+                    self._local_cpu_sample = {"busy": busy, "total": total, "timestamp": now}
+                    return None
+        except Exception as e:
+            logger.debug(f"Could not read local /proc/stat: {e}")
+        return None
+
+    def _read_local_linux_guest_ram(self) -> Dict[str, Any]:
+        """Read guest physical RAM metrics from Linux /proc/meminfo."""
+        import os
+        res = {
+            "guest_total_ram_mb": None,
+            "guest_used_ram_mb": None,
+            "guest_available_ram_mb": None,
+            "guest_ram_percent": None,
+            "guest_memory_pressure": "N/A"
+        }
+        if not os.path.exists("/proc/meminfo"):
+            return res
+        try:
+            meminfo = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        k = parts[0].strip()
+                        v = parts[1].strip().split()[0]
+                        meminfo[k] = int(v)
+            if "MemTotal" in meminfo:
+                total_kb = meminfo["MemTotal"]
+                avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+                used_kb = max(0, total_kb - avail_kb)
+                total_mb = round(total_kb / 1024.0, 1)
+                avail_mb = round(avail_kb / 1024.0, 1)
+                used_mb = round(used_kb / 1024.0, 1)
+                pct = round((used_kb / total_kb * 100.0), 1) if total_kb > 0 else 0.0
+
+                pressure = "high" if pct > 85.0 else ("moderate" if pct > 70.0 else "normal")
+                return {
+                    "guest_total_ram_mb": total_mb,
+                    "guest_used_ram_mb": used_mb,
+                    "guest_available_ram_mb": avail_mb,
+                    "guest_ram_percent": pct,
+                    "guest_memory_pressure": pressure
+                }
+        except Exception as e:
+            logger.debug(f"Could not read /proc/meminfo: {e}")
+        return res
+
     def get_vm_runtime_metrics(self, vm_info: Dict[str, Any]) -> Dict[str, Any]:
         """
         Query runtime metrics (CPU utilization %, Memory utilization %, Network RX/TX)
-        for a discovered VM using VM_metrics, VM_guest_metrics, and VIFs.
-        Handles missing or optional metrics gracefully without crashing or failing discovery.
+        for a discovered VM using Xen VM CPU-time counters, VM_metrics, VM_guest_metrics, and VIFs.
+        Computes real CPU utilization from consecutive samples.
+        Collects guest memory and Xen-assigned memory strictly separately without fake 100% calculations.
         """
         if not self.is_connected or not self.proxy or not self.session_id:
             raise ConnectionError(self.last_error or "XAPI client not connected")
 
+        now = time.time()
+        vm_name = vm_info.get("name", "Unknown VM")
+        vm_uuid = vm_info.get("uuid", "unknown-uuid")
+        vcpu_count = int(vm_info.get("vcpus", 1))
+
         cpu_percent = 0.0
-        used_ram_mb = 0.0
-        ram_percent = 0.0
+        cpu_source = "xen_cpu_time_counter"
+        cpu_status = "ok"
+
+        # Xen Memory
+        allocated_ram_mb = vm_info.get("memory_dynamic_max_mb") or vm_info.get("memory_static_max_mb") or 0.0
+        target_mb = vm_info.get("memory_target_mb", 0.0)
+
+        # Guest Memory (Default to None / N/A unless confirmed by guest metrics or local probe)
+        guest_total_ram_mb = None
+        guest_used_ram_mb = None
+        guest_available_ram_mb = None
+        guest_ram_percent = None
+        guest_memory_pressure = "N/A"
+        memory_source = "xen_hypervisor_only"
+        memory_status = "guest_metrics_unavailable"
+
         net_rx_bytes = 0
         net_tx_bytes = 0
-
-        allocated_ram_mb = vm_info.get("memory_dynamic_max_mb") or vm_info.get("memory_static_max_mb") or 0.0
 
         # 1. Read VM_metrics (Hypervisor level)
         metrics_ref = vm_info.get("metrics_ref")
@@ -315,44 +420,99 @@ class XenAPIClient:
                 m_res = self.proxy.VM_metrics.get_record(self.session_id, metrics_ref)
                 if m_res.get("Status") == "Success":
                     m_data = m_res.get("Value", {})
-                    vcpu_utils = m_data.get("VCPUs_utilisation", {})
-                    if vcpu_utils:
-                        vals = [float(v) * 100.0 if float(v) <= 1.0 else float(v) for v in vcpu_utils.values()]
-                        cpu_percent = round(sum(vals) / len(vals), 1)
-
+                    
+                    # Actual hypervisor-assigned memory
                     mem_actual = int(m_data.get("memory_actual", 0))
                     if mem_actual > 0:
                         allocated_ram_mb = round(mem_actual / (1024 * 1024), 1)
-                    logger.debug(f"Retrieved hypervisor metrics for {vm_info.get('name')}: CPU={cpu_percent}%, AllocatedRAM={allocated_ram_mb}MB")
+
+                    # A. CPU Utilization from consecutive CPU-time counters
+                    # XenAPI VCPUs_CPU_usage maps vCPU number -> cumulative CPU time in seconds
+                    vcpu_cpu_usage = m_data.get("VCPUs_CPU_usage", {})
+                    if vcpu_cpu_usage:
+                        try:
+                            total_cpu_sec = sum(float(v) for v in vcpu_cpu_usage.values())
+                            prev_sample = self._cpu_usage_history.get(vm_uuid)
+                            if prev_sample is not None:
+                                dt = now - prev_sample["timestamp"]
+                                dc = total_cpu_sec - prev_sample["total_cpu_seconds"]
+                                if dt > 0.05 and dc >= 0.0:
+                                    calc_pct = (dc / (dt * max(1, vcpu_count))) * 100.0
+                                    cpu_percent = round(min(100.0, max(0.0, calc_pct)), 1)
+                                    cpu_source = "xen_cpu_time_counter"
+                                    cpu_status = "ok"
+                                elif dc < 0.0:
+                                    # Counter reset (VM rebooted or time adjusted)
+                                    logger.debug(f"CPU counter reset detected for VM {vm_name}")
+                                    cpu_status = "calibrating"
+                            else:
+                                cpu_status = "calibrating"
+
+                            self._cpu_usage_history[vm_uuid] = {
+                                "timestamp": now,
+                                "total_cpu_seconds": total_cpu_sec
+                            }
+                        except Exception as ce:
+                            logger.debug(f"Error parsing VCPUs_CPU_usage for {vm_name}: {ce}")
+
+                    # Fallback to VCPUs_utilisation if provided by Xen guest tools
+                    if cpu_percent == 0.0:
+                        vcpu_utils = m_data.get("VCPUs_utilisation", {})
+                        if vcpu_utils:
+                            vals = [float(v) * 100.0 if float(v) <= 1.0 else float(v) for v in vcpu_utils.values()]
+                            if sum(vals) > 0.0:
+                                cpu_percent = round(sum(vals) / len(vals), 1)
+                                cpu_source = "xen_vcpu_utilisation"
+                                cpu_status = "ok"
+
             except Exception as e:
-                logger.warning(f"Error querying VM_metrics for {vm_info.get('name')}: {e}")
+                logger.warning(f"Error querying VM_metrics for {vm_name}: {e}")
 
-        # 2. Read VM_guest_metrics (Guest OS level if xen-tools/balloon active)
-        guest_ref = vm_info.get("guest_metrics_ref")
-        if guest_ref and guest_ref != "OpaqueRef:NULL":
-            try:
-                gm_res = self.proxy.VM_guest_metrics.get_record(self.session_id, guest_ref)
-                if gm_res.get("Status") == "Success":
-                    gm_data = gm_res.get("Value", {})
-                    mem_map = gm_data.get("memory", {})
-                    if "free" in mem_map and "total" in mem_map:
-                        g_total = float(mem_map["total"])
-                        g_free = float(mem_map["free"])
-                        g_used = max(0.0, g_total - g_free)
-                        used_ram_mb = round(g_used / (1024 * 1024), 1)
-                        ram_percent = round((g_used / g_total * 100), 1) if g_total > 0 else 0.0
-                        logger.debug(f"Retrieved guest memory metrics for {vm_info.get('name')}: UsedRAM={used_ram_mb}MB ({ram_percent}%)")
-            except Exception as e:
-                logger.debug(f"Guest metrics unavailable for {vm_info.get('name')}: {e}")
+        # 2. Local Linux guest-side CPU & RAM verification (for Application VM running locally)
+        is_local_app_vm = (vm_name.lower() in ("alpine-linux", "alpine-linux-new") or vm_name == self.config.app_vm_name)
+        if is_local_app_vm:
+            # Read local guest RAM directly from /proc/meminfo
+            local_ram = self._read_local_linux_guest_ram()
+            if local_ram["guest_total_ram_mb"] is not None:
+                guest_total_ram_mb = local_ram["guest_total_ram_mb"]
+                guest_used_ram_mb = local_ram["guest_used_ram_mb"]
+                guest_available_ram_mb = local_ram["guest_available_ram_mb"]
+                guest_ram_percent = local_ram["guest_ram_percent"]
+                guest_memory_pressure = local_ram["guest_memory_pressure"]
+                memory_source = "guest_proc_meminfo"
+                memory_status = "ok"
 
-        # If guest metrics are not reporting exact free RAM, estimate from dynamic target vs memory_actual
-        if ram_percent == 0.0 and allocated_ram_mb > 0:
-            target_mb = vm_info.get("memory_target_mb", 0)
-            if target_mb > 0:
-                used_ram_mb = target_mb
-                ram_percent = round((used_ram_mb / allocated_ram_mb * 100), 1)
+            # Check local guest CPU from /proc/stat
+            local_cpu = self._read_local_linux_guest_cpu()
+            if local_cpu is not None and (cpu_percent == 0.0 or cpu_status == "calibrating"):
+                cpu_percent = local_cpu
+                cpu_source = "guest_proc_stat"
+                cpu_status = "ok"
 
-        # 3. Read Network Virtual Interfaces (VIF metrics)
+        # 3. Read VM_guest_metrics (Guest OS level via Xen tools if active, e.g. for Database VM)
+        if guest_ram_percent is None:
+            guest_ref = vm_info.get("guest_metrics_ref")
+            if guest_ref and guest_ref != "OpaqueRef:NULL":
+                try:
+                    gm_res = self.proxy.VM_guest_metrics.get_record(self.session_id, guest_ref)
+                    if gm_res.get("Status") == "Success":
+                        gm_data = gm_res.get("Value", {})
+                        mem_map = gm_data.get("memory", {})
+                        if "free" in mem_map and "total" in mem_map:
+                            g_total = float(mem_map["total"])
+                            g_free = float(mem_map["free"])
+                            g_used = max(0.0, g_total - g_free)
+                            guest_total_ram_mb = round(g_total / (1024 * 1024), 1)
+                            guest_available_ram_mb = round(g_free / (1024 * 1024), 1)
+                            guest_used_ram_mb = round(g_used / (1024 * 1024), 1)
+                            guest_ram_percent = round((g_used / g_total * 100), 1) if g_total > 0 else 0.0
+                            guest_memory_pressure = "high" if guest_ram_percent > 85.0 else ("moderate" if guest_ram_percent > 70.0 else "normal")
+                            memory_source = "xen_guest_metrics"
+                            memory_status = "ok"
+                except Exception as e:
+                    logger.debug(f"Guest metrics unavailable for {vm_name}: {e}")
+
+        # 4. Read Network Virtual Interfaces (VIF metrics)
         vif_refs = vm_info.get("vifs", [])
         for vif_ref in vif_refs:
             try:
@@ -367,29 +527,55 @@ class XenAPIClient:
                             net_rx_bytes += int(float(vif_metrics.get("io_read_kbs", 0.0)) * 1024)
                             net_tx_bytes += int(float(vif_metrics.get("io_write_kbs", 0.0)) * 1024)
             except Exception as e:
-                logger.debug(f"Error querying VIF {vif_ref} for {vm_info.get('name')}: {e}")
+                logger.debug(f"Error querying VIF {vif_ref} for {vm_name}: {e}")
 
-        logger.debug(f"Normalized metrics for {vm_info.get('name')}: CPU={cpu_percent}%, RAM={ram_percent}%, NetRX={net_rx_bytes}, NetTX={net_tx_bytes}")
+        # Normalize used_ram_mb and ram_percent for backwards compatibility:
+        # If guest metrics are available, use guest used RAM.
+        # If unavailable, set to 0.0 (or None) and NEVER fake 100% by setting target = allocated.
+        norm_used_ram_mb = guest_used_ram_mb if guest_used_ram_mb is not None else 0.0
+        norm_ram_pct = guest_ram_percent if guest_ram_percent is not None else 0.0
 
         return {
-            "uuid": vm_info["uuid"],
-            "name": vm_info["name"],
-            "power_state": vm_info["power_state"],
-            "vcpu_count": vm_info["vcpus"],
+            "uuid": vm_uuid,
+            "name": vm_name,
+            "power_state": vm_info.get("power_state", "Unknown"),
+            "vcpu_count": vcpu_count,
+            "online_vcpus": vcpu_count,
+            "max_vcpus": int(vm_info.get("max_vcpus", vcpu_count)),
+            
+            # Real CPU Telemetry
             "cpu_percent": cpu_percent,
-            "ram_percent": ram_percent,
-            "allocated_ram_mb": allocated_ram_mb,
-            "used_ram_mb": used_ram_mb,
-            "network_rx_bytes": net_rx_bytes,
-            "network_tx_bytes": net_tx_bytes,
+            "cpu_source": cpu_source,
+            "cpu_status": cpu_status,
+            
+            # Xen Configured & Assigned Memory
             "configured_dynamic_min_mb": vm_info.get("memory_dynamic_min_mb", 0.0),
             "configured_dynamic_max_mb": vm_info.get("memory_dynamic_max_mb", 0.0),
             "configured_static_min_mb": vm_info.get("memory_static_min_mb", 0.0),
             "configured_static_max_mb": vm_info.get("memory_static_max_mb", 0.0),
-            "actual_allocated_ram_mb": allocated_ram_mb,
-            "actual_guest_used_ram_mb": used_ram_mb,
+            "xen_memory_target_mb": target_mb,
+            "xen_assigned_ram_mb": allocated_ram_mb,
+            "allocated_ram_mb": allocated_ram_mb,
+            
+            # Real Guest Memory Telemetry (Distinct!)
+            "guest_total_ram_mb": guest_total_ram_mb,
+            "guest_used_ram_mb": guest_used_ram_mb,
+            "guest_available_ram_mb": guest_available_ram_mb,
+            "guest_ram_percent": guest_ram_percent,
+            "guest_memory_pressure": guest_memory_pressure,
+            "used_ram_mb": norm_used_ram_mb,
+            "ram_percent": norm_ram_pct,
+            "memory_source": memory_source,
+            "memory_status": memory_status,
+            
+            # Network
+            "network_rx_bytes": net_rx_bytes,
+            "network_tx_bytes": net_tx_bytes,
+            
+            # Capabilities
             "supports_ballooning": vm_info.get("supports_ballooning", False),
-            "supports_vcpu_hotplug": vm_info.get("supports_vcpu_hotplug", False)
+            "supports_vcpu_hotplug": vm_info.get("supports_vcpu_hotplug", False),
+            "timestamp": now
         }
 
     def get_vm_by_uuid(self, uuid: str) -> Optional[Dict[str, Any]]:

@@ -24,7 +24,12 @@ from backend.services.xen_service import (
     start_ram_workload_service,
     start_database_workload_service,
     stop_workload_service,
-    stop_all_workloads_service
+    stop_all_workloads_service,
+    get_student_load_status,
+    start_student_load_service,
+    stop_student_load_service,
+    emergency_stop_student_load_service,
+    execute_simulated_student_db_query
 )
 
 xen_bp = Blueprint("xen", __name__, url_prefix="/api/xen")
@@ -583,4 +588,96 @@ def xen_workload_emergency_stop():
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+# -------------------------------------------------------------
+# Student Load Simulator Routes (Real Student Traffic)
+# -------------------------------------------------------------
+
+@xen_bp.route("/student-load/status", methods=["GET"])
+def xen_student_load_status():
+    """
+    GET /api/xen/student-load/status
+    Returns live statistics from real student load simulation.
+    """
+    try:
+        status = get_student_load_status()
+        return jsonify({"success": True, "data": status}), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/student-load/start", methods=["POST"])
+@admin_required
+def xen_student_load_start():
+    """
+    POST /api/xen/student-load/start
+    Start real student traffic generation (1 to 200 concurrent users).
+    Body: { target_vm, simulated_students, ramp_up_duration, test_duration, requests_per_student, workload_intensity }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        target_vm = data.get("target_vm", "app_vm")
+        students = int(data.get("simulated_students", 10))
+        ramp_up = int(data.get("ramp_up_duration", 10))
+        duration = int(data.get("test_duration", 60))
+        req_per_sec = float(data.get("requests_per_student", 2.0))
+        intensity = str(data.get("workload_intensity", "medium"))
+        initiated_by = request.user.get("email", "admin")
+
+        res = start_student_load_service(
+            target_vm=target_vm,
+            simulated_students=students,
+            ramp_up_duration=ramp_up,
+            test_duration=duration,
+            requests_per_student=req_per_sec,
+            workload_intensity=intensity,
+            initiated_by=initiated_by
+        )
+        status_code = 200 if res.get("success") else 400
+        return jsonify(res), status_code
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/student-load/stop", methods=["POST"])
+@admin_required
+def xen_student_load_stop():
+    """
+    POST /api/xen/student-load/stop
+    Gracefully stops active student load test.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        res = stop_student_load_service(session_id)
+        return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/student-load/emergency-stop", methods=["POST"])
+@admin_required
+def xen_student_load_emergency_stop():
+    """
+    POST /api/xen/student-load/emergency-stop
+    Immediate Emergency Stop for student load generators and scaling decisions.
+    """
+    try:
+        res = emergency_stop_student_load_service()
+        return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@xen_bp.route("/student-load/db-query", methods=["POST"])
+def xen_student_load_db_query():
+    """
+    POST /api/xen/student-load/db-query
+    Internal endpoint called by simulated student workers to generate safe MariaDB transactions.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id", "sim-default")
+        student_id = int(data.get("student_id", 1))
+        res = execute_simulated_student_db_query(session_id, student_id)
+        return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 

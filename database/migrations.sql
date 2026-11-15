@@ -188,6 +188,32 @@ CREATE TABLE IF NOT EXISTS workload_simulation_test (
     INDEX idx_sim_test_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 12. Create student load test sessions table for real student traffic simulation
+CREATE TABLE IF NOT EXISTS student_load_test_sessions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL UNIQUE,
+    target_vm VARCHAR(50) NOT NULL, -- 'app_vm', 'db_vm', 'both'
+    simulated_students INT NOT NULL,
+    ramp_up_sec INT NOT NULL DEFAULT 10,
+    test_duration_sec INT NOT NULL DEFAULT 60,
+    workload_intensity VARCHAR(30) NOT NULL DEFAULT 'medium',
+    requests_per_student FLOAT NOT NULL DEFAULT 2.0,
+    status VARCHAR(30) NOT NULL DEFAULT 'running', -- 'ramping_up', 'running', 'stopped', 'emergency_stopped', 'completed', 'error'
+    total_requests INT NOT NULL DEFAULT 0,
+    successful_requests INT NOT NULL DEFAULT 0,
+    failed_requests INT NOT NULL DEFAULT 0,
+    avg_response_time_ms FLOAT NOT NULL DEFAULT 0.0,
+    peak_rps FLOAT NOT NULL DEFAULT 0.0,
+    db_queries_total INT NOT NULL DEFAULT 0,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    stopped_at TIMESTAMP NULL,
+    initiated_by VARCHAR(100) NOT NULL DEFAULT 'admin',
+    error_message TEXT NULL,
+    INDEX idx_sl_session (session_id),
+    INDEX idx_sl_started (started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 
 
 

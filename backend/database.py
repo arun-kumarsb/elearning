@@ -1,4 +1,5 @@
 import os
+import time
 import socket
 import logging
 import sqlite3
@@ -11,17 +12,28 @@ logger = logging.getLogger(__name__)
 ACTIVE_DB_MODE = None
 LOCAL_SQLITE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database", "elearning_local.db")
 
+_last_mariadb_check_time = 0.0
+_last_mariadb_status = False
+
 def is_mariadb_reachable() -> bool:
-    """Test if MariaDB server at Config.DB_HOST:Config.DB_PORT is reachable."""
+    """Test if MariaDB server at Config.DB_HOST:Config.DB_PORT is reachable with caching."""
+    global _last_mariadb_check_time, _last_mariadb_status
     if Config.USE_MOCK_DB:
         return False
+    now = time.time()
+    if (now - _last_mariadb_check_time) < 5.0:
+        return _last_mariadb_status
+
+    _last_mariadb_check_time = now
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.5)
+        s.settimeout(1.0)
         res = s.connect_ex((Config.DB_HOST, Config.DB_PORT))
         s.close()
-        return res == 0
+        _last_mariadb_status = (res == 0)
+        return _last_mariadb_status
     except Exception:
+        _last_mariadb_status = False
         return False
 
 def get_sqlite_connection():
@@ -162,8 +174,78 @@ def init_sqlite_schema(conn):
             payload TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS student_load_test_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE,
+            target_vm TEXT NOT NULL,
+            simulated_students INTEGER NOT NULL,
+            ramp_up_sec INTEGER DEFAULT 10,
+            test_duration_sec INTEGER DEFAULT 60,
+            workload_intensity TEXT DEFAULT 'medium',
+            requests_per_student REAL DEFAULT 2.0,
+            status TEXT DEFAULT 'running',
+            total_requests INTEGER DEFAULT 0,
+            successful_requests INTEGER DEFAULT 0,
+            failed_requests INTEGER DEFAULT 0,
+            avg_response_time_ms REAL DEFAULT 0.0,
+            peak_rps REAL DEFAULT 0.0,
+            db_queries_total INTEGER DEFAULT 0,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            stopped_at DATETIME,
+            initiated_by TEXT DEFAULT 'admin',
+            error_message TEXT
+        );
     """)
     conn.commit()
+
+# Pre-computed hash for password 'SimStudent@123' using pbkdf2:sha256
+SIMULATED_STUDENT_PASSWORD_HASH = "pbkdf2:sha256:1000000$LHWW9g77yC0CZuA0$57bffe0028cdfea8d26d26dcc8391fea937ee2bfc9284fb0b5bb65c73506eb48"
+
+def ensure_simulated_student_pool(target_count: int = 200) -> int:
+    """
+    Idempotently pre-seed dedicated simulated student accounts (up to target_count)
+    strictly under '@elearning.test' domain. Never touches or conflicts with real users.
+    Returns the count of verified simulated student accounts.
+    """
+    try:
+        # Check existing count
+        existing = query_db("SELECT COUNT(*) as cnt FROM users WHERE email LIKE '%@elearning.test'")
+        current_cnt = existing[0]["cnt"] if existing else 0
+        if current_cnt >= target_count:
+            return current_cnt
+
+        logger.info(f"Seeding dedicated simulated student pool: {current_cnt} -> {target_count}...")
+        for i in range(current_cnt + 1, target_count + 1):
+            email = f"sim_student_{i}@elearning.test"
+            name = f"Simulated Student #{i}"
+            
+            # Insert student
+            execute_db(
+                "INSERT INTO students (name, email) VALUES (%s, %s) ON DUPLICATE KEY UPDATE name=name" 
+                if ACTIVE_DB_MODE == "mariadb" 
+                else "INSERT OR IGNORE INTO students (name, email) VALUES (?, ?)",
+                (name, email)
+            )
+            
+            # Fetch student ID
+            st_row = query_db(
+                "SELECT id FROM students WHERE email = %s" if ACTIVE_DB_MODE == "mariadb" else "SELECT id FROM students WHERE email = ?",
+                (email,)
+            )
+            s_id = st_row[0]["id"] if st_row else None
+            
+            # Insert user
+            execute_db(
+                "INSERT INTO users (email, password_hash, role, student_id) VALUES (%s, %s, 'student', %s) ON DUPLICATE KEY UPDATE role='student'"
+                if ACTIVE_DB_MODE == "mariadb"
+                else "INSERT OR IGNORE INTO users (email, password_hash, role, student_id) VALUES (?, ?, 'student', ?)",
+                (email, SIMULATED_STUDENT_PASSWORD_HASH, s_id)
+            )
+        return target_count
+    except Exception as e:
+        logger.warning(f"Error ensuring simulated student pool: {e}")
+        return 0
 
 def get_connection():
     """

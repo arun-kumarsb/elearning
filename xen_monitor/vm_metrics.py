@@ -55,11 +55,14 @@ class MetricsNormalizer:
         net_stats = self.network_monitor.compute_network_rates(vm_id, rx_bytes, tx_bytes, now)
 
         allocated_ram = float(raw_vm.get("allocated_ram_mb", 0.0))
+        guest_used = raw_vm.get("guest_used_ram_mb")
+        guest_avail = raw_vm.get("guest_available_ram_mb")
+        guest_total = raw_vm.get("guest_total_ram_mb")
+        guest_pct = raw_vm.get("guest_ram_percent")
+        
+        # Backward compatibility for legacy tests expecting used_ram_mb
         used_ram = float(raw_vm.get("used_ram_mb", 0.0))
         ram_pct = float(raw_vm.get("ram_percent", 0.0))
-        
-        if ram_pct == 0.0 and allocated_ram > 0 and used_ram > 0:
-            ram_pct = round((used_ram / allocated_ram * 100), 1)
 
         return {
             "entity_type": role_label,
@@ -69,22 +72,38 @@ class MetricsNormalizer:
             "power_state": raw_vm.get("power_state", "Unknown"),
             "timestamp": now,
             "timestamp_iso": iso_time,
+            "freshness_seconds": round(time.time() - now, 2),
             "vcpu_count": int(raw_vm.get("vcpu_count", 1)),
             "cpu_percent": round(float(raw_vm.get("cpu_percent", 0.0)), 1),
+            "cpu_source": raw_vm.get("cpu_source", "xen_cpu_time_counter"),
+            "cpu_status": raw_vm.get("cpu_status", "ok"),
+            
+            # Xen Allocation
             "allocated_ram_mb": allocated_ram,
+            "xen_assigned_ram_mb": float(raw_vm.get("xen_assigned_ram_mb", allocated_ram)),
+            "xen_memory_target_mb": float(raw_vm.get("xen_memory_target_mb", 0.0)),
+            "configured_dynamic_min_mb": raw_vm.get("configured_dynamic_min_mb", 0.0),
+            "configured_dynamic_max_mb": raw_vm.get("configured_dynamic_max_mb", 0.0),
+            "configured_static_min_mb": raw_vm.get("configured_static_min_mb", 0.0),
+            "configured_static_max_mb": raw_vm.get("configured_static_max_mb", 0.0),
+            
+            # Guest Telemetry (Separated!)
+            "guest_total_ram_mb": guest_total,
+            "guest_used_ram_mb": guest_used,
+            "guest_available_ram_mb": guest_avail,
+            "guest_ram_percent": guest_pct,
+            "guest_memory_pressure": raw_vm.get("guest_memory_pressure", "N/A"),
             "used_ram_mb": used_ram,
             "ram_percent": round(ram_pct, 1),
+            "memory_source": raw_vm.get("memory_source", "xen_hypervisor_only"),
+            "memory_status": raw_vm.get("memory_status", "ok"),
+            
+            # Network
             "network_rx_bytes": rx_bytes,
             "network_tx_bytes": tx_bytes,
             "network_rx_kbs": net_stats["network_rx_kbs"],
             "network_tx_kbs": net_stats["network_tx_kbs"],
             "network_rate_human": net_stats["network_rate_human"],
-            "configured_dynamic_min_mb": raw_vm.get("configured_dynamic_min_mb", 0.0),
-            "configured_dynamic_max_mb": raw_vm.get("configured_dynamic_max_mb", 0.0),
-            "configured_static_min_mb": raw_vm.get("configured_static_min_mb", 0.0),
-            "configured_static_max_mb": raw_vm.get("configured_static_max_mb", 0.0),
-            "actual_allocated_ram_mb": allocated_ram,
-            "actual_guest_used_ram_mb": used_ram,
             "supports_ballooning": raw_vm.get("supports_ballooning", False),
             "supports_vcpu_hotplug": raw_vm.get("supports_vcpu_hotplug", False),
             "status": "online" if raw_vm.get("power_state") == "Running" else "offline"

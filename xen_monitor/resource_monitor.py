@@ -77,7 +77,7 @@ class XenResourceMonitor:
         raise ValueError(f"Invalid allocation mode '{mode}'. Must be 'manual' or 'auto'.")
 
     def set_emergency_stop(self, enabled: bool) -> bool:
-        """Toggle emergency stop status and halt any active synthetic workloads."""
+        """Toggle emergency stop status and halt any active synthetic workloads and student load simulations."""
         self.allocation_engine.set_emergency_stop(enabled)
         if enabled:
             try:
@@ -85,6 +85,11 @@ class XenResourceMonitor:
                 WorkloadSimulatorService.get_instance().stop_all_workloads()
             except Exception as e:
                 logger.warning(f"Failed to stop active workloads during emergency stop: {e}")
+            try:
+                from backend.services.student_load_service import StudentLoadSimulatorService
+                StudentLoadSimulatorService.get_instance().emergency_stop_all()
+            except Exception as e:
+                logger.warning(f"Failed to stop student load simulations during emergency stop: {e}")
         return self.allocation_engine.emergency_stop
 
     def start(self):
@@ -553,13 +558,16 @@ class XenResourceMonitor:
                  trigger_reason, action_type, execution_status, error_message, initiated_by)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
+            prev_val = float(action.get("previous_value") or 0.0)
+            req_val = float(action.get("requested_value") or 0.0)
+            act_val = float(action.get("actual_value") or 0.0)
             execute_db(sql, (
                 action.get("vm_name"),
                 action.get("vm_uuid"),
                 action.get("resource_type"),
-                action.get("previous_value"),
-                action.get("requested_value"),
-                action.get("actual_value"),
+                prev_val,
+                req_val,
+                act_val,
                 action.get("trigger_reason"),
                 action.get("action_type", "auto_scale"),
                 action.get("execution_status", "success"),

@@ -267,5 +267,36 @@ def api_stop_db_workload(session_id: Optional[str] = None) -> Dict[str, Any]:
 def api_workload_emergency_stop() -> Dict[str, Any]:
     return safe_request("POST", "xen/workload/emergency-stop")
 
+# -------------------------------------------------------------
+# Student Load Simulator API Endpoints
+# -------------------------------------------------------------
+def api_get_student_load_status() -> Dict[str, Any]:
+    return safe_request("GET", "xen/student-load/status")
+
+def api_start_student_load(
+    target_vm: str = "app_vm",
+    simulated_students: int = 10,
+    ramp_up_duration: int = 10,
+    test_duration: int = 60,
+    requests_per_student: float = 2.0,
+    workload_intensity: str = "medium"
+) -> Dict[str, Any]:
+    return safe_request("POST", "xen/student-load/start", {
+        "target_vm": target_vm,
+        "simulated_students": simulated_students,
+        "ramp_up_duration": ramp_up_duration,
+        "test_duration": test_duration,
+        "requests_per_student": requests_per_student,
+        "workload_intensity": workload_intensity
+    })
+
+def api_stop_student_load(session_id: Optional[str] = None) -> Dict[str, Any]:
+    payload = {"session_id": session_id} if session_id else {}
+    return safe_request("POST", "xen/student-load/stop", payload)
+
+def api_emergency_stop_student_load() -> Dict[str, Any]:
+    return safe_request("POST", "xen/student-load/emergency-stop")
+
+
 
 

@@ -97,6 +97,7 @@ XenLearn/
 │       ├── dashboard_service.py    # MariaDB statistical aggregation
 │       ├── enrollment_service.py   # Enrollment logic & duplicate prevention
 │       ├── student_service.py      # Student profile & user account linkage
+│       ├── student_load_service.py # Real Student Load Simulator (1-200 concurrent HTTP/DB threads)
 │       ├── workload_service.py     # Live CPU, RAM, & MariaDB transactional workload simulator
 │       └── xen_service.py          # Xen monitoring engine service interface
 ├── frontend/
@@ -114,7 +115,7 @@ XenLearn/
 │       ├── courses.py              # Course catalog (Student) & Course CRUD (Admin)
 │       ├── enrollments.py          # My Enrollments (Student) & Registry (Admin)
 │       ├── admin.py                # Administrator diagnostic hub
-│       ├── xen_monitoring.py       # Live Xen Resource Monitoring Dashboard & Gauges
+│       ├── intelligent_orchestration.py # Unified Intelligent Resource Orchestration & Load Simulator
 │       └── xen_architecture.py     # Educational visualization of Xen infrastructure
 ├── database/
 │   ├── schema.sql                  # Complete canonical database schema
@@ -132,7 +133,9 @@ XenLearn/
 │   └── elearning.conf              # Nginx reverse proxy config for Alpine Linux
 ├── tests/
 │   ├── test_api.py                 # Automated unit tests for Phase 1 REST endpoints
-│   └── test_xen_monitoring.py      # Automated unit tests for Phase 2 Xen monitoring (14 tests)
+│   ├── test_xen_monitoring.py      # Automated unit tests for Phase 2 Xen monitoring (14 tests)
+│   ├── test_dynamic_allocation.py  # Automated unit tests for Phase 3 Dynamic Allocation (28 tests)
+│   └── test_student_load_orchestration.py # Verification of genuine telemetry, simulator & orchestration (20 tests)
 ├── .env.example                    # Comprehensive environment variable reference
 ├── setup_alpine.sh                 # One-click Alpine Linux dependency installer
 ├── start_backend.sh                # Script to start Flask on 0.0.0.0:5000
@@ -159,6 +162,8 @@ XenLearn/
 6. **`allocation_decisions_history`:** Audit trail for Phase 3 elasticity recommendations (`vm_name`, `cpu_action`, `ram_action`, `current_vcpus`, `recommended_vcpus`, `current_ram_mb`, `recommended_ram_mb`, `rationale`, `cooldown_active`).
 7. **`workload_simulation_sessions`:** Audit and session tracking for live synthetic CPU, RAM, and MariaDB workload generators (`session_id`, `vm_name`, `workload_type`, `intensity`, `duration_seconds`, `status`, `started_at`, `stopped_at`, `error_message`).
 8. **`workload_simulation_test`:** Dedicated isolated transient table used solely for synthetic MariaDB transaction simulation, ensuring core student, course, and enrollment data remain completely isolated and unaffected.
+9. **`student_load_test_sessions`:** Audit and live metric tracking for student-driven load simulation sessions (`session_id`, `target_service`, `concurrent_students`, `ramp_up_seconds`, `duration_seconds`, `intensity_profile`, `status`, `total_requests`, `successful_requests`, `failed_requests`, `avg_rps`, `avg_latency_ms`, `peak_latency_ms`, `avg_qps`, `started_at`, `stopped_at`, `error_message`).
+10. **Pre-Seeded Simulated Student Pool:** Dedicated pool of 200 synthetic student accounts (`sim_student_1@elearning.test` to `sim_student_200@elearning.test`) created with standard credentials (`SimStudent@123`), guaranteeing production and evaluation student records are never corrupted.
 
 ---
 
@@ -197,7 +202,7 @@ nc -zv 10.189.191.248 3306
 # Run the automated migration script
 python3 database/apply_migrations.py
 ```
-*Expected output: `[SUCCESS] 8 migration statements processed successfully!`*
+*Expected output: `[SUCCESS] 9 migration statements processed successfully!`*
 
 ---
 
@@ -397,11 +402,48 @@ curl -s -X POST http://10.189.191.51:5000/api/xen/allocation/transition-baseline
   -d '{"vm_name":"Alpine-Linux"}'
 ```
 
+### 27. Student Load Simulator: Status & Live Statistics
+```bash
+curl -s http://10.189.191.51:5000/api/xen/student-load/status
+```
+
+### 28. Student Load Simulator: Start Multi-Student Test (1 to 200 Students)
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/student-load/start \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"target_service":"both", "concurrent_students":50, "intensity_profile":"medium", "duration_seconds":120, "ramp_up_seconds":10}'
+```
+
+### 29. Student Load Simulator: Stop Running Test
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/student-load/stop \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"load-test-abc123"}'
+```
+
+### 30. Student Load Simulator: Master Emergency Stop
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/student-load/emergency-stop \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
+
+### 31. Student Load Simulator: Execute Simulated Student DB Transaction
+```bash
+curl -s -X POST http://10.189.191.51:5000/api/xen/student-load/db-query \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"student_email":"sim_student_1@elearning.test"}'
+```
+
 ---
 
-## 10. Xen-Based Dynamic Resource Allocation (Phase 1, 2 & 3)
+## 10. Xen-Based Dynamic Resource Allocation & Intelligent Orchestration
 
 The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scalable E-Learning Services"**.
+
+Active Development Branch: `phase3-student-load-autoscaling`
 
 ### Phase 1: Decoupled Multi-VM Architecture (Complete)
 - Responsive e-learning web application running across two Alpine Linux VMs (Application Server & MariaDB Database Server).
@@ -412,37 +454,65 @@ The project title emphasizes: **"Xen-Based Dynamic Resource Allocation for Scala
 - Normalized physical host hardware metrics (cores, CPU %, total/available RAM) and guest telemetry.
 - Telemetry persistence into `vm_metrics_history` and `allocation_decisions_history`.
 
-### Phase 3: Dynamic Autoscaling Engine & Live Workload Simulator (Complete)
-Implemented in `xen_monitor/xen_api_client.py`, `xen_monitor/allocation_engine.py`, `xen_monitor/resource_monitor.py`, `backend/services/workload_service.py`, and `frontend/pages/dynamic_allocation.py`:
-1. **Target Baseline Architecture:**
-   - **Application VM (`Alpine-Linux`):** Baseline target of 1 vCPU and 1024 MB RAM (Min: 1 vCPU, 1024 MB RAM; Max: 4 vCPUs, 4096 MB RAM).
-   - **Database VM (`Alpine-DB`):** Baseline target of 1 vCPU and 1024 MB RAM (Min: 1 vCPU, 1024 MB RAM; Max: 4 vCPUs, 4096 MB RAM), with isolated transactional safety validation.
-   - **Safe Baseline Transition:** One-click transition procedure that steps down resources safely while verifying VM liveness, host headroom, and guest OOM prevention limits.
-2. **Real XenAPI Live Actuation:**
-   - **Live vCPU Scaling:** Actuates live CPU hotplugging via `VM.set_VCPUs_number_live` and persists configuration via `VM.set_VCPUs_at_startup`.
-   - **Dynamic Memory Ballooning:** Modifies Xen dynamic memory range via `VM.set_memory_dynamic_range` and adjusts live target via `VM.set_memory_target_live` with strict limit verification (`static_min <= dynamic_min <= dynamic_max <= static_max`).
-   - **Post-Change Verification:** Re-queries VM records via XenAPI to confirm the hypervisor accepted the modification.
-3. **Intelligent Allocation Engine with Asymmetric Hysteresis:**
-   - **Threshold Rules:** CPU >80% scales up (+1 vCPU up to 4); CPU <25% scales down (-1 vCPU down to 1). RAM >85% scales up (+512 MB up to 4096 MB); RAM <30% scales down (-512 MB down to 1024 MB, enforcing a 256 MB safety headroom over active usage).
-   - **Consecutive Breach Timing:** Requires **3 consecutive intervals** (>80% CPU or >85% RAM) for scale-up, and **6 consecutive intervals** (<25% CPU or <30% RAM) for scale-down to guarantee anti-thrashing stability.
-   - **Independent Cooldowns:** Per-resource cooldown tracking `(VM, 'cpu')` and `(VM, 'ram')` (60s) ensures CPU cooldown does not block memory evaluation.
-   - **Thread-Safe Actuation Lock:** Prevents race conditions and clashing XenAPI transactions across parallel requests.
-   - **Stale Telemetry Detection:** If metrics are older than 30s, the engine suspends automated scaling actions.
-   - **Maintenance Required Mode:** Detects if guest tools lack live hotplug/ballooning capability and cleanly reports `MAINTENANCE_REQUIRED` without crashing.
-4. **Live Workload Simulator:**
-   - **App VM CPU Stress Generator:** Calibrated mathematical workloads with configurable duty cycle (25%, 50%, 75%, 90%), worker count (1-4), and duration (30-180s).
-   - **App VM RAM Allocation Generator:** Allocates and touches resident memory pages (128 MB to 768 MB) with mandatory pre-flight host/guest OOM safety checks.
-   - **DB VM MariaDB Simulator:** Executes realistic read/write queries with explicit transaction rollbacks on dedicated transient table `workload_simulation_test`, guaranteeing zero modification or corruption of real student and course records.
-   - **Master Emergency Stop:** Immediately disengages autoscaling and terminates all active workload generators with one click.
-5. **Streamlit Dynamic Resource Allocation Dashboard:**
-   - Features Status Interlocks banner, Side-by-Side VM Baseline & Runtime telemetry, Live Workload Simulator control panel, Recommendations table with 1-click execution, Manual sliders with confirmation gates, Audit logs, 4 Real-time trend charts (including vCPU count and dynamic RAM), and Static vs. Dynamic efficiency analysis.
+### Phase 3: Real Student-Driven Dynamic Allocation & Unified Orchestration (Complete)
+Implemented in `backend/services/student_load_service.py`, `xen_monitor/xen_api_client.py`, `xen_monitor/allocation_engine.py`, `xen_monitor/resource_monitor.py`, `xen_monitor/vm_metrics.py`, and `frontend/pages/intelligent_orchestration.py`:
+
+#### Unified Primary Section: `🚀 Intelligent Resource Orchestration`
+Replaced the previous two disparate sections (`📈 Xen Resource Monitoring` and `⚡ Dynamic Resource Allocation`) with a single high-performance orchestration control deck comprising 9 coordinated components:
+
+1. **System Status & Quick Action Banner:**
+   - Displays real-time Xen hypervisor connection status, discovered VM state, active scaling mode (`Auto` vs `Manual`), and a prominent one-click Emergency Stop toggle.
+2. **Student Load Simulator:**
+   - Generates authentic, multi-threaded HTTP and database transactions representing 1, 5, 10, 25, 50, 100, 150, or 200 concurrent simulated students.
+   - Three intensity profiles:
+     - `Light`: Browsing courses, viewing profile (1–2 req/s per student).
+     - `Medium`: Enrolling in courses, viewing dashboard, fetching active enrollments (3–5 req/s per student).
+     - `Heavy`: High-frequency course enrollment, unenrollment, search, and transactional queries (8–12 req/s per student).
+   - Gradual ramp-up (5s to 30s) avoiding sudden artificial spikes.
+   - Dedicated pool of 200 synthetic accounts (`sim_student_1@elearning.test` to `sim_student_200@elearning.test`), preserving production data.
+   - Live real-time KPIs: Active Students, Joining/Leaving status, Requests/sec (RPS), Database QPS, Latency (average & p95 ms), and Success Rate %.
+3. **Side-by-Side VM Baseline vs. Live Telemetry Monitors:**
+   - Displays real-time status for `Alpine-Linux` (UUID: `01cdb87c-408f-72bc-449c-0364a8e69647`) and `Alpine-DB` (UUID: `0a6dec09-0466-0079-4b66-80704b59587d`).
+   - Dynamic UUID discovery by VM name with verification fallback.
+   - Genuine CPU utilization calculated from consecutive Xen `VCPUs_CPU_usage` deltas divided by elapsed wall-clock time and vCPU count (with guest `/proc/stat` validation).
+   - Strict separation of Xen-assigned memory (`memory_actual`) from guest OS memory (`/proc/meminfo` or `VM_guest_metrics`), completely eliminating the fake 100% RAM display.
+   - Explicit `N/A` reporting when guest memory metrics are unavailable, triggering a safe `HOLD` to prevent hazardous premature downscaling.
+4. **Real-Time Telemetry & Scaling Actuation Charts:**
+   - Synchronized historical time-series plots:
+     - Real-Time CPU Utilization % (App VM vs DB VM with 80% Scale-Up and 25% Scale-Down threshold lines).
+     - Guest RAM Utilization % (App VM vs DB VM with 85% Scale-Up and 30% Scale-Down threshold lines).
+     - Dynamic vCPU Count (Live stepping 1 -> 2 -> 3 -> 4 vCPUs).
+     - Dynamic RAM Allocation vs Guest Used (MB) showing actual ballooning actions.
+5. **Dynamic Autoscaling Decision Feed:**
+   - Real-time display of evaluated scaling recommendations for both VMs.
+   - Visual progress indicators for asymmetric hysteresis consecutive sample counters (Scale-up: 3 samples, Scale-down: 6 samples).
+   - Explicit display of rationale, cooldown timers, and safety hold reasons.
+6. **Autonomous Scaling Controls & Policy Rules:**
+   - Mode switcher: `Autonomous Auto-Scaling` vs `Manual Administrator Override`.
+   - Asymmetric Hysteresis Engine:
+     - CPU Scale-Up: 3 consecutive readings >80% (+1 vCPU up to 4).
+     - CPU Scale-Down: 6 consecutive readings <25% (-1 vCPU down to 1).
+     - RAM Scale-Up: 3 consecutive readings >85% (+512 MB up to 4096 MB).
+     - RAM Scale-Down: 6 consecutive readings <30% (-512 MB down to 1024 MB with 256 MB safety headroom).
+     - Cooldown: 60s per-VM per-resource `(VM, 'cpu')` and `(VM, 'ram')`.
+7. **Manual Resource Allocation Sliders:**
+   - Live administrator controls to scale vCPUs (1 to 4) and RAM (1024 to 4096 MB in 256/512 MB increments).
+   - Two-step confirmation with readback verification from XenAPI before reporting success.
+8. **Safety Invariants & Diagnostic Health Panel:**
+   - Master Emergency Stop halts both autoscaling and all active load simulator sessions within one polling tick.
+   - Automated Safety Cutoff: Auto-terminates load tests if API/DB error rates exceed 50%.
+   - Host capacity check: Requires at least 256 MB host free RAM headroom before any scale-up.
+   - Non-destructive invariant: Zero VM reboots, shutdowns, or migrations.
+9. **Historical Allocation & Student Load Audit Logs:**
+   - Comprehensive audit trail of all manual and autonomous scaling actions, previous vs new values, success/failure status, and XenAPI error messages.
+   - Complete history of student load simulation sessions with duration, total requests, error counts, and peak latency.
 
 ---
 
 ## 11. Running Automated Tests
 
-Run the complete automated test suite covering Phase 1 REST APIs, Phase 2 Xen monitoring engine, and Phase 3 Dynamic Allocation & Workload Simulator:
+Run the complete automated test suite covering Phase 1 REST APIs, Phase 2 Xen monitoring engine, Phase 3 Dynamic Allocation, and Phase 3 Student Load Orchestration:
 ```bash
 python3 -m unittest discover tests
 ```
-*Result: 64/64 tests passing with 100% success rate across all test suites.*
+*Result: 84/84 tests passing with 100% success rate across all test suites.*

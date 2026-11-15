@@ -6,6 +6,7 @@ Provides service functions interfacing the Flask API routes with the Xen Resourc
 """
 
 import os
+import time
 import platform
 import logging
 from typing import Dict, Any, List, Optional
@@ -248,5 +249,66 @@ def stop_all_workloads_service() -> Dict[str, Any]:
     """Stop all active workload sessions (Emergency Stop)."""
     from backend.services.workload_service import WorkloadSimulatorService
     return WorkloadSimulatorService.get_instance().stop_all_workloads()
+
+# -------------------------------------------------------------
+# Student Load Simulator Service Functions
+# -------------------------------------------------------------
+def get_student_load_status() -> Dict[str, Any]:
+    """Retrieve real-time telemetry from active Student Load Simulator."""
+    from backend.services.student_load_service import StudentLoadSimulatorService
+    return StudentLoadSimulatorService.get_instance().get_status()
+
+def start_student_load_service(
+    target_vm: str = "app_vm",
+    simulated_students: int = 10,
+    ramp_up_duration: int = 10,
+    test_duration: int = 60,
+    requests_per_student: float = 2.0,
+    workload_intensity: str = "medium",
+    initiated_by: str = "admin"
+) -> Dict[str, Any]:
+    """Launch real student traffic generation against API & DB."""
+    from backend.services.student_load_service import StudentLoadSimulatorService
+    return StudentLoadSimulatorService.get_instance().start_load_test(
+        target_vm=target_vm,
+        simulated_students=simulated_students,
+        ramp_up_duration=ramp_up_duration,
+        test_duration=test_duration,
+        requests_per_student=requests_per_student,
+        workload_intensity=workload_intensity,
+        initiated_by=initiated_by
+    )
+
+def stop_student_load_service(session_id: Optional[str] = None) -> Dict[str, Any]:
+    """Stop active student load test."""
+    from backend.services.student_load_service import StudentLoadSimulatorService
+    return StudentLoadSimulatorService.get_instance().stop_load_test(session_id)
+
+def emergency_stop_student_load_service() -> Dict[str, Any]:
+    """Emergency stop all student traffic generators and scaling."""
+    from backend.services.student_load_service import StudentLoadSimulatorService
+    return StudentLoadSimulatorService.get_instance().emergency_stop_all()
+
+def execute_simulated_student_db_query(session_id: str, student_id: int) -> Dict[str, Any]:
+    """
+    Execute a safe transient read/write on the dedicated workload_simulation_test table
+    to generate authentic MariaDB query workload without touching real student/course data.
+    """
+    from backend.database import execute_db, query_db
+    try:
+        payload = f"student_{student_id}_{int(time.time()*1000)}"
+        execute_db(
+            "INSERT INTO workload_simulation_test (session_id, payload) VALUES (%s, %s)",
+            (session_id, payload)
+        )
+        # Immediate readback with filtering
+        rows = query_db(
+            "SELECT id, session_id, payload FROM workload_simulation_test WHERE session_id = %s ORDER BY id DESC LIMIT 5",
+            (session_id,)
+        )
+        return {"success": True, "rows_read": len(rows)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 

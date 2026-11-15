@@ -35,8 +35,7 @@ def render_sidebar():
         if role == "admin":
             nav_options = [
                 "📊 Dashboard",
-                "📈 Xen Resource Monitoring",
-                "⚡ Dynamic Resource Allocation",
+                "🚀 Intelligent Resource Orchestration",
                 "👥 Student Management",
                 "📚 Course Management",
                 "📝 Enrollment Overview",
@@ -46,7 +45,6 @@ def render_sidebar():
         else:
             nav_options = [
                 "📊 Dashboard",
-                "📈 Xen Resource Monitoring",
                 "📚 Available Courses",
                 "📝 My Enrolled Courses"
             ]
